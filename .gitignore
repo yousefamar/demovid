@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+node_modules/
+target/
+*.mp4
+*.mkv
+*.flac
+*.wav
+/recordings/
