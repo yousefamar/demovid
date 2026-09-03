@@ -1,6 +1,6 @@
 # Demovid — CLI screen recorder for product demos (Linux / Sway / NVIDIA)
 
-Screen Studio, but for Yousef's machine: record the whole output at OS level, then render auto-zoom on clicks/focus, an enlarged smoothed cursor, a webcam PiP, and loudness-normalised audio. CLI only, single user. Project page + working docs live in the vault: `~/sync/brain/root/projects/demovid/` (`index.md` = public brief, `research.md` = tool/lib survey with verified facts, `roadmap.md` = milestones + open decisions, `board.md` = kanban). Read `research.md` before touching capture code — most of the hard constraints are there.
+Screen Studio, but for Yousef's machine: record the whole output at OS level, then render auto-zoom on clicks/focus, an enlarged smoothed cursor, a webcam PiP, and loudness-normalised audio. CLI only, single user. Project page + working docs live in the vault: `~/sync/brain/root/projects/demovid/` (`repo` symlinks back here; `index.md` = public brief, `research.md` = tool/lib survey with verified facts, `roadmap.md` = milestones + open decisions, `board.md` = kanban). Read `research.md` before touching capture code — most of the hard constraints are there.
 
 ## Git: commit to `main`, never branch
 Trunk-based like Console. No feature branches, no worktree branches that outlive the work — fold into `main` and delete. Ticket forks land on `main` too.
