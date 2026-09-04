@@ -60,8 +60,12 @@ Every line has `t` (float seconds) and `kind`. Coordinates are **output pixels, 
 Rules:
 - `render` must tolerate unknown `kind`s (skip them) and missing optional fields.
 - The zoom planner is a pure function `list[event] → list[keyframe]`; it never opens a video.
-- Keyframe shape (planner output, not on disk): `{t, cx, cy, zoom}` — centre in output px, `zoom ≥ 1`. The renderer interpolates between keyframes; the planner decides easing by emitting enough of them.
+- Keyframe shape (planner output, not on disk): `{t, cx, cy, zoom}` — *desired* centre in output px, `zoom ≥ 1`. The renderer smoothsteps between consecutive keyframes (a hold is two equal keyframes) and clamps the centre per frame so the crop stays inside the output — so a zoom-out keeps its target centre and slides into place.
+
+## Webcam PiP vs the live preview window
+
+`render --pip-mode fixed` (default) paints the PiP in a fixed output corner, Screen-Studio style. That only covers the recorded preview window while zoom = 1; zoomed in, the preview window in `screen.mp4` shows wherever the crop lands. `--pip-mode scene` instead paints the camera *into the source frame* at `preview_rect` before the zoom warp — it covers the preview window exactly at every zoom, but the PiP then zooms with the content. `rec` should keep the preview window where it will least often be zoomed into (a bottom corner), and either mode is a valid render choice.
 
 ## Screenix import
 
-`~/Videos/screenix/recording_<ts>/` has `cursor.json` (`[{timestamp, x, y}]` px), `*.mp4.meta.json` (clicks normalised 0–1), a screen mp4 and a camera mp4. `import-screenix` writes a v1 dir with `source: "screenix"`, `cursor_source: "screenix"`, remuxed (not re-encoded) streams, `offset_s: 0`, and `cursor`/`button` events only. No `key`/`focus` events exist for imports — the planner must still produce something sensible from clicks alone.
+`~/Videos/screenix/recording_<ts>/` has `<name>.cursor.json` (`[{timestamp, x, y}]` px @ ~120 Hz), `<name>.mp4.meta.json` (`click_events` normalised 0–1 + `key_events` with `label`/`pressed`), `<name>.mp4` (screen, with the mic as an AAC track), `<name>.camera.seekable.mp4` (Screenix's indexed re-encode; the raw `.camera.mp4` is 10× larger and unindexed). `import-screenix` writes a v1 dir with `source: "screenix"`, `cursor_source: "screenix"`, **hardlinked** `screen.mp4` / `cam.mp4` (zero extra disk; render only reads the video track of `screen.mp4`), `mic.flac` extracted from the screen file's audio, all `offset_s: 0`, and `cursor`/`button`/`key` events. No `focus` events exist for imports, so the planner's typing target falls back to the cursor position.
