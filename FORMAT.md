@@ -8,7 +8,7 @@
   screen.mp4     full output, NVENC h264, 60 fps
   cam.mp4        webcam, NVENC h264, 720p30 or 1080p30 (absent if no camera)
   mic.flac       mono, 48 kHz (absent if no mic)
-  events.jsonl   one JSON object per line, ascending t
+  events.jsonl   one JSON object per line, ascending t (except `stream` lines, appended at stop)
 ```
 
 ## Clock
@@ -42,6 +42,7 @@
 - `streams.cam.preview_rect` is `[x, y, w, h]` of the live preview window in output px — `render` paints the clean PiP over exactly that region. Omit if no preview was shown.
 - `cursor_source` is one of `ext-image-copy-capture`, `layer-shell-anchor`, `evdev-dead-reckoning`, `screenix`, `none`. `render` uses it to decide how much to trust `cursor` events (e.g. dead-reckoning may need drift correction).
 - `source` is `demovid` or `screenix` (imported). Imported manifests fill what they can; missing streams are omitted, not nulled.
+- `rec` also writes informational extras that `render` may ignore: `streams.mic.source` / `volume_pct` (the PipeWire source and its level at stop — decision 4 says warn, never force), `input_devices` (evdev node names read), `offset_s: null` when a stream never reported a first frame.
 
 ## events.jsonl
 
@@ -50,12 +51,12 @@ Every line has `t` (float seconds) and `kind`. Coordinates are **output pixels, 
 | kind | fields | notes |
 |---|---|---|
 | `cursor` | `x, y` | pointer position; ~120 Hz from the cursor session, whatever the source gives otherwise |
-| `button` | `button, state, x, y` | `button` ∈ `left, right, middle, side, extra`; `state` ∈ `down, up`; `x, y` = last known cursor position or `null` |
-| `key` | `key, state, mods` | `key` = evdev name lowercased without `KEY_` (`a`, `enter`, `leftshift`); `mods` = subset of `["ctrl","alt","shift","super"]` held at the time |
-| `focus` | `con_id, app_id, title, rect` | Sway focus changed to this window; `rect` = `[x, y, w, h]` output px; `app_id` may be `null` for Xwayland (then `class` is present) |
-| `window` | `change, con_id, rect` | `change` ∈ `new, close, move, resize, fullscreen, floating` for the focused window only |
+| `button` | `button, state, x, y, dev` | `button` ∈ `left, right, middle, side, extra, forward, back, task`; `state` ∈ `down, up`; `x, y` = last known cursor position or `null`; `dev` = evdev device name (informational) |
+| `key` | `key, state, mods, dev` | `key` = evdev name lowercased without `KEY_` (`a`, `enter`, `leftshift`); `mods` = subset of `["ctrl","alt","shift","super"]` held *before* this press (so `leftctrl` down has `mods: []`); key repeats are not logged; absent entirely with `rec --no-keys` |
+| `focus` | `con_id, app_id, title, rect` | Sway focus changed to this window; `rect` = `[x, y, w, h]` output px (container rect incl. title bar); `app_id` may be `null` for Xwayland (then `class` is present). `rec` writes one at `t = 0` for the initially focused window and never logs its own preview window |
+| `window` | `change, con_id, rect` | `change` ∈ `new, close` for any window; `move, floating, fullscreen` for the focused window only (Sway emits no resize events) |
 | `mark` | `label` | manual marker (`clap`, `chapter`, …) — used for sync checks and trims |
-| `stream` | `stream, event` | `event` ∈ `first_frame, stopped` — the raw evidence behind `offset_s`; render ignores these |
+| `stream` | `stream, event` | `event` ∈ `first_frame, stopped` — the raw evidence behind `offset_s`, appended when the recording stops (so out of `t` order); render ignores these |
 
 Rules:
 - `render` must tolerate unknown `kind`s (skip them) and missing optional fields.
