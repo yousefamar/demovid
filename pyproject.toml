@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.0",
     "opencv-python-headless>=4.10",
     "av>=13.0",
+    "pillow>=12.3.0",
 ]
 
 [project.scripts]

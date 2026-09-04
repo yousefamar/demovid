@@ -15,7 +15,7 @@ from .events import EventLog
 from .inputs import InputLogger
 from .state import clear_state, log_path, write_state
 from .streams import (Preview, Stream, cam_stream, mic_stream, screen_stream, tool_versions, unsuspend_source,
-                      wait_first_frames)
+                      wait_first_frames, wf_supports_no_cursor)
 
 FIRST_FRAME_TIMEOUT_S = 8.0
 MIC_WAKE_S = 0.4
@@ -69,7 +69,30 @@ class Session:
         self.output = sway.pick_output(self.conn, o.output)
         self.sway_version = self.conn.get_version().human_readable
 
-        self.streams: list[Stream] = [screen_stream(self.dir, self.output.name, o.fps, cq=o.cq)]
+        # The cursor session only reports a HARDWARE cursor, and wf-recorder's cursor overlay forces a
+        # software one — so exact positions and a baked-in cursor are mutually exclusive. Start the
+        # session first: if it tracks, record without the overlay and let render draw the cursor.
+        self.cursor_session: cursor.CursorSession | None = None
+        self.cursor_source = "none"
+        self.shapes_dir = self.dir / cursor.SHAPES_DIR
+        try:
+            cs = cursor.CursorSession(self.events, self.clock, self.output.name, self.output.scale,
+                                      shapes_dir=self.shapes_dir)
+            cs.start()
+            self.cursor_session = cs
+        except Exception as e:
+            self.log(f"cursor session unavailable ({e}); cursor_source=none")
+        self.tracking = self._wait_for_cursor()
+        if self.tracking:
+            self.cursor_source = cursor.SOURCE_NAME
+        overlay_cursor = not self.tracking
+        if self.tracking and not wf_supports_no_cursor():
+            self.log("wf-recorder has no --no-cursor (unpatched build): recording the cursor overlay, which "
+                     "forces a software cursor and will stop position tracking")
+            overlay_cursor = True
+
+        self.streams: list[Stream] = [
+            screen_stream(self.dir, self.output.name, o.fps, cq=o.cq, overlay_cursor=overlay_cursor)]
         cam_dev = o.cam_device if o.cam_device and Path(o.cam_device).exists() else None
         if o.cam_device and not cam_dev:
             self.log(f"camera {o.cam_device} not present, skipping cam")
@@ -101,17 +124,8 @@ class Session:
             if s.name == "cam" and o.preview:
                 self._start_preview(s)
 
-        self.cursor_session: cursor.CursorSession | None = None
-        self.cursor_source = "none"
-        try:
-            cs = cursor.CursorSession(self.events, self.clock, self.output.name, self.output.scale)
-            cs.start()
-            self.cursor_session = cs
-            self.cursor_source = cursor.SOURCE_NAME
-        except Exception as e:
-            self.log(f"cursor session unavailable ({e}); cursor_source=none")
-
-        self.inputs = InputLogger(self.events, self.clock, self._cursor_pos, log_keys=o.log_keys)
+        self.inputs = InputLogger(self.events, self.clock, self._cursor_pos, log_keys=o.log_keys,
+                                  window_at=self._window_at)
         self.inputs.start()
         self.log(f"evdev: {', '.join(self.inputs.device_names())}")
 
@@ -152,6 +166,44 @@ class Session:
 
     def _cursor_pos(self) -> tuple[int, int] | None:
         return self.cursor_session.position if self.cursor_session else None
+
+    def _wait_for_cursor(self, timeout_s: float = 1.0) -> bool:
+        """True once the compositor reports a hardware cursor. It only does so on an output commit,
+        so nudge one per poll rather than waiting for the desktop to repaint on its own."""
+        cs = self.cursor_session
+        if cs is None:
+            return False
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if cs.hw_cursor_seen:
+                return True
+            self.conn.command("nop demovid cursor probe")
+            time.sleep(0.05)
+        self.log("no hardware cursor reported: WLR_NO_HARDWARE_CURSORS is set (see ~/.local/bin/sway-nvidia) "
+                 "or another screencopy client is overlaying the cursor; positions unavailable")
+        return False
+
+    def _window_at(self, pos: tuple[int, int] | None) -> dict | None:
+        """Smallest window containing the (output-relative) point, for `button.window`."""
+        if pos is None:
+            return None
+        x, y = pos[0] + self.output.x, pos[1] + self.output.y
+        best = None
+        try:
+            for con in self.conn.get_tree().descendants():
+                if con.type not in ("con", "floating_con") or not (con.app_id or con.window_class):
+                    continue
+                r = con.rect
+                if r.x <= x < r.x + r.width and r.y <= y < r.y + r.height:
+                    if best is None or r.width * r.height < best.rect.width * best.rect.height:
+                        best = con
+        except Exception:
+            return None
+        if best is None:
+            return None
+        return {"con_id": best.id, "app_id": best.app_id,
+                **({"class": best.window_class} if best.app_id is None and best.window_class else {}),
+                "rect": self.output.relative(best.rect)}
 
     def _preview_geometry(self) -> tuple[int, int, int, int]:
         pw, ph = self.opts.preview_size
@@ -226,7 +278,9 @@ class Session:
             "monotonic_ns": self.clock.monotonic_ns,
             "output": self.output.as_dict(),
             "streams": streams,
-            "cursor": {"theme": self.theme, "size": self.theme_size, "hidden_during_rec": self.cursor_hidden},
+            "cursor": {"theme": self.theme, "size": self.theme_size,
+                       "hidden_during_rec": self.cursor_hidden or self.tracking,
+                       "shapes_dir": cursor.SHAPES_DIR if self.shapes_dir.is_dir() else None},
             "cursor_source": self.cursor_source,
             "input_devices": self.inputs.device_names(),
             "tools": {"sway": self.sway_version, **tool_versions()},

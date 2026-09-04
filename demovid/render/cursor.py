@@ -1,7 +1,8 @@
-"""Synthetic cursor: smoothed track from cursor events, cached arrow sprites, click ripples."""
+"""Cursor rendering: smoothed track from cursor events, real captured shapes or a synthetic arrow, ripples."""
 
 import math
 from functools import lru_cache
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -51,6 +52,75 @@ def gaussian(a: np.ndarray, sigma: float) -> np.ndarray:
     k /= k.sum()
     padded = np.pad(a, r, mode="edge")
     return np.convolve(padded, k, mode="valid")
+
+
+
+class ShapeTrack:
+    """The cursor images `rec` captured (cursors/<id>.png + `cursor_shape` events), keyed by time.
+
+    A `cursor_shape` event marks the instant a new image became current, so the shape in force at t is
+    the last event at or before t. Missing files degrade to the synthetic arrow.
+    """
+
+    def __init__(self, events: list[dict], shapes_dir: Path | None):
+        self.dir = shapes_dir
+        self.marks: list[tuple[float, str, tuple[int, int], float]] = []
+        for e in events:
+            if e.get("kind") != "cursor_shape" or not e.get("id"):
+                continue
+            hs = e.get("hotspot") or [0, 0]
+            self.marks.append((float(e["t"]), str(e["id"]), (int(hs[0]), int(hs[1])), float(e.get("scale") or 1.0)))
+        self.marks.sort()
+        self.present = bool(self.marks) and shapes_dir is not None and shapes_dir.is_dir()
+
+    def at(self, t: float):
+        """(bgr, alpha, hotspot_x, hotspot_y) in source pixels, or None to fall back to the arrow."""
+        if not self.present:
+            return None
+        i = -1
+        for j, m in enumerate(self.marks):
+            if m[0] <= t:
+                i = j
+            else:
+                break
+        if i < 0:
+            i = 0  # before the first capture: the first shape is the best guess
+        _, sid, hotspot, scale = self.marks[i]
+        img = load_shape(self.dir / f"{sid}.png")
+        if img is None:
+            return None
+        bgr, alpha = img
+        return bgr, alpha, hotspot[0] / scale, hotspot[1] / scale
+
+
+@lru_cache(maxsize=32)
+def load_shape(path: Path):
+    if not path.exists():
+        return None
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None or img.ndim != 3:
+        return None
+    if img.shape[2] == 3:
+        return img, np.ones(img.shape[:2], np.float32)
+    return np.ascontiguousarray(img[..., :3]), img[..., 3].astype(np.float32) / 255.0
+
+
+def draw_shape(frame: np.ndarray, x: float, y: float, shape, scale: float) -> None:
+    """Draw a captured cursor image with its hotspot at (x, y), scaled by `scale`."""
+    bgr, alpha, hx, hy = shape
+    h, w = alpha.shape
+    tw, th = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+    bgr_s = cv2.resize(bgr, (tw, th), interpolation=interp)
+    alpha_s = np.clip(cv2.resize(alpha, (tw, th), interpolation=interp), 0.0, 1.0)
+    pad = max(2, int(0.18 * max(tw, th)))
+    shadow = np.zeros((th + 2 * pad, tw + 2 * pad), np.float32)
+    dy = int(round(0.06 * th))
+    shadow[pad + dy:pad + dy + th, pad:pad + tw] = alpha_s
+    shadow = cv2.GaussianBlur(shadow, (0, 0), pad / 2.4) * 0.45
+    blend(frame, np.zeros((*shadow.shape, 3), np.uint8), shadow,
+          int(round(x - hx * scale)) - pad, int(round(y - hy * scale)) - pad)
+    blend(frame, bgr_s, alpha_s, int(round(x - hx * scale)), int(round(y - hy * scale)))
 
 
 STYLES = {"dark": (20.0, 255.0), "light": (255.0, 0.0)}  # (fill, outline) grey levels

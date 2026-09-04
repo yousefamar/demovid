@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -151,9 +152,22 @@ class _WfMarker:
         return self.fallback
 
 
-def screen_stream(out_dir: Path, output: str, fps: int, codec: str = "h264_nvenc", cq: int = 20) -> Stream:
-    cmd = [
-        "wf-recorder", "--log", "--no-damage",
+@lru_cache(maxsize=1)
+def wf_supports_no_cursor() -> bool:
+    """Upstream wf-recorder always overlays the cursor; ours takes --no-cursor (see CLAUDE.md)."""
+    try:
+        out = subprocess.run(["wf-recorder", "--help"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--no-cursor" in out.stdout + out.stderr
+
+
+def screen_stream(out_dir: Path, output: str, fps: int, codec: str = "h264_nvenc", cq: int = 20,
+                  overlay_cursor: bool = True) -> Stream:
+    cmd = ["wf-recorder", "--log", "--no-damage"]
+    if not overlay_cursor:
+        cmd.append("--no-cursor")
+    cmd += [
         "-o", output,
         "-r", str(fps),
         "-c", codec, "-p", "preset=p4", "-p", "rc=vbr", "-p", f"cq={cq}",

@@ -63,9 +63,41 @@ def restore(st: dict | None = None) -> list[str]:
     return done
 
 
+def _cursor_tracking(timeout_s: float = 1.0) -> tuple[bool, str]:
+    """Does the compositor actually report a hardware cursor? Nothing else can give exact positions."""
+    import tempfile
+    import time
+
+    from ..rec import sway
+    from ..rec.clock import Clock
+    from ..rec.cursor import CursorSession
+    from ..rec.events import EventLog
+
+    conn = sway.connect()
+    output = sway.pick_output(conn, None)
+    with tempfile.TemporaryDirectory() as td:
+        clock = Clock.start()
+        log = EventLog(Path(td) / "events.jsonl", clock)
+        session = CursorSession(log, clock, output.name, output.scale)
+        session.start()
+        deadline = time.monotonic() + timeout_s
+        try:
+            while time.monotonic() < deadline and not session.hw_cursor_seen:
+                conn.command("nop demovid doctor cursor probe")
+                time.sleep(0.05)
+        finally:
+            session.stop()
+            log.close()
+    if session.hw_cursor_seen:
+        return True, f"hardware cursor tracked at {session.position}, hotspot {session.hotspot}"
+    return False, ("no hardware cursor reported: unset WLR_NO_HARDWARE_CURSORS in ~/.local/bin/sway-nvidia and "
+                   "re-login, or stop the screencopy client that is overlaying the cursor")
+
+
 def checks(out_root: Path) -> list[tuple[str, str, str]]:
     from ..rec import cursor, sway
     from ..rec.inputs import input_devices
+    from ..rec.streams import wf_supports_no_cursor
 
     res: list[tuple[str, str, str]] = []
 
@@ -78,11 +110,19 @@ def checks(out_root: Path) -> list[tuple[str, str, str]]:
         res.append((FAIL, "sway", f"IPC unreachable: {e}"))
 
     try:
-        res.append((OK if cursor.available() else WARN, "cursor",
+        res.append((OK if cursor.available() else WARN, "cursor protocol",
                     "ext-image-copy-capture-v1 advertised" if cursor.available()
                     else "no ext-image-copy-capture-v1 (needs Sway >= 1.11): cursor positions won't be logged"))
+        if cursor.available():
+            tracking, why = _cursor_tracking()
+            res.append((OK if tracking else FAIL, "cursor tracking", why))
     except Exception as e:
-        res.append((WARN, "cursor", f"wayland probe failed: {e}"))
+        res.append((WARN, "cursor protocol", f"wayland probe failed: {e}"))
+
+    res.append((OK if wf_supports_no_cursor() else WARN, "wf-recorder --no-cursor",
+                "supported: the cursor can be left out of the frames" if wf_supports_no_cursor()
+                else "unpatched build: the cursor overlay is forced, which disables cursor tracking "
+                     "(see CLAUDE.md for the ~/src/wf-recorder-0.5.0 patch)"))
 
     for tool in ("wf-recorder", "ffmpeg", "ffprobe", "pactl", "notify-send"):
         res.append((OK if shutil.which(tool) else FAIL, tool, shutil.which(tool) or "not on PATH"))

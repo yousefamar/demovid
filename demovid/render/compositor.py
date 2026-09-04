@@ -7,7 +7,8 @@ from functools import lru_cache
 import cv2
 import numpy as np
 
-from demovid.render.cursor import CursorTrack, blend, draw_cursor, draw_ripple
+from demovid.render.chips import draw_chips, visible_chips
+from demovid.render.cursor import CursorTrack, ShapeTrack, blend, draw_cursor, draw_ripple, draw_shape
 from demovid.render.planner import Keyframe, state_at
 
 SUPERSAMPLE = 4
@@ -21,6 +22,11 @@ class Look:
     cursor: bool = True
     cursor_scale: float = 2.5     # multiples of the 24 px system cursor at zoom 1
     cursor_style: str = "dark"    # dark: macOS-like black arrow, white edge; light: Adwaita-like
+    cursor_real: bool = True      # use the shapes `rec` captured when the recording has them
+    chips: bool = True            # keystroke chips
+    chip_height: float = 0.045    # fraction of output height
+    chip_margin: float = 0.055
+    chip_gap: float = 0.012
     ripple: bool = True
     ripple_s: float = 0.45
     ripple_px: float = 34.0
@@ -38,7 +44,8 @@ class Look:
 class Compositor:
     def __init__(self, keyframes: list[Keyframe], src_w: int, src_h: int, look: Look,
                  cursor: CursorTrack | None, clicks: list[tuple[float, float, float]],
-                 preview_rect: list | None = None):
+                 preview_rect: list | None = None, shapes: ShapeTrack | None = None,
+                 chips: list[tuple[float, float, str]] | None = None):
         self.kf = keyframes
         self.src_w, self.src_h = src_w, src_h
         self.look = look
@@ -47,6 +54,8 @@ class Compositor:
         self.clicks = sorted((t, *(cursor.at_time(t) or (x, y))) if cursor is not None and cursor.present else (t, x, y)
                              for t, x, y in clicks)
         self.preview_rect = preview_rect
+        self.shapes = shapes
+        self.chips = chips or []
         self._click_i = 0
 
     def compose(self, frame: np.ndarray, t: float, frame_i: int, cam: np.ndarray | None) -> np.ndarray:
@@ -72,7 +81,13 @@ class Compositor:
                 for ct, kx, ky in self.active_clicks(t):
                     draw_ripple(out, kx * s + tx, ky * s + ty, t - ct, L.ripple_s, L.ripple_px * L.out_scale * math.sqrt(zoom))
             pressed = any(0 <= t - ct < 0.12 for ct, _, _ in self.active_clicks(t))
-            draw_cursor(out, ox, oy, size * (0.86 if pressed else 1.0), L.cursor_style)
+            squash = 0.86 if pressed else 1.0
+            shape = self.shapes.at(t) if (L.cursor_real and self.shapes is not None) else None
+            if shape is not None:
+                # the captured image is the real cursor at 1x, so scale it like the 24 px reference
+                draw_shape(out, ox, oy, shape, size / max(shape[1].shape[0], 1) * squash)
+            else:
+                draw_cursor(out, ox, oy, size * squash, L.cursor_style)
 
         if cam is not None and L.pip and L.pip_mode == "fixed":
             ramp = min(max((zoom - 1) / max(L.zoom_level - 1, 1e-6), 0.0), 1.0)
@@ -81,6 +96,10 @@ class Compositor:
             x = margin if "l" in L.pip_pos else L.out_w - margin - size
             y = margin if "t" in L.pip_pos else L.out_h - margin - size
             self.paste_pip(out, cam, [x, y, size, size], L.pip_radius)
+
+        if L.chips and self.chips:
+            draw_chips(out, visible_chips(self.chips, t), max(12, int(round(L.chip_height * L.out_h))),
+                       int(round(L.chip_margin * L.out_h)), int(round(L.chip_gap * L.out_h)))
         return out
 
     def active_clicks(self, t: float):

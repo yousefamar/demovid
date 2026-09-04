@@ -8,6 +8,7 @@
   screen.mp4     full output, NVENC h264, 60 fps
   cam.mp4        webcam, NVENC h264, 720p30 or 1080p30 (absent if no camera)
   mic.flac       mono, 48 kHz (absent if no mic)
+  cursors/       <id>.png per distinct cursor image (absent unless the cursor session captured shapes)
   events.jsonl   one JSON object per line, ascending t (except `stream` lines, appended at stop)
 ```
 
@@ -31,7 +32,7 @@
                "preview_rect": [1520, 800, 384, 216]},
     "mic":    {"file": "mic.flac", "sample_rate": 48000, "channels": 1, "offset_s": 0.05}
   },
-  "cursor": {"theme": "Adwaita", "size": 24, "hidden_during_rec": true},
+  "cursor": {"theme": "Adwaita", "size": 24, "hidden_during_rec": true, "shapes_dir": "cursors"},
   "cursor_source": "ext-image-copy-capture",
   "tools": {"sway": "1.10.1", "wf-recorder": "0.4.1", "ffmpeg": "6.1.1"},
   "source": "demovid"
@@ -40,6 +41,7 @@
 
 - `output.x/y` are the output's position in Sway's global layout; all event coordinates are already output-relative (see below), these exist only for debugging.
 - `streams.cam.preview_rect` is `[x, y, w, h]` of the live preview window in output px — `render` paints the clean PiP over exactly that region. Omit if no preview was shown.
+- `cursor.shapes_dir` names the subdir of captured cursor PNGs (`null` when none were captured). `cursor.hidden_during_rec` is true when the frames contain no cursor — either the blank-theme swap (`rec --hide-cursor`) or, more usually, because `rec` recorded with `wf-recorder --no-cursor`.
 - `cursor_source` is one of `ext-image-copy-capture`, `layer-shell-anchor`, `evdev-dead-reckoning`, `screenix`, `none`. `render` uses it to decide how much to trust `cursor` events (e.g. dead-reckoning may need drift correction).
 - `source` is `demovid` or `screenix` (imported). Imported manifests fill what they can; missing streams are omitted, not nulled.
 - `rec` also writes informational extras that `render` may ignore: `streams.mic.source` / `volume_pct` (the PipeWire source and its level at stop — decision 4 says warn, never force), `input_devices` (evdev node names read), `offset_s: null` when a stream never reported a first frame.
@@ -51,10 +53,12 @@ Every line has `t` (float seconds) and `kind`. Coordinates are **output pixels, 
 | kind | fields | notes |
 |---|---|---|
 | `cursor` | `x, y` | pointer position; ~120 Hz from the cursor session, whatever the source gives otherwise |
-| `button` | `button, state, x, y, dev` | `button` ∈ `left, right, middle, side, extra, forward, back, task`; `state` ∈ `down, up`; `x, y` = last known cursor position or `null`; `dev` = evdev device name (informational) |
+| `button` | `button, state, x, y, dev, window?` | `button` ∈ `left, right, middle, side, extra, forward, back, task`; `state` ∈ `down, up`; `x, y` = last known cursor position or `null`; `dev` = evdev device name (informational); `window` (down only, needs a known position) = `{con_id, app_id, class?, rect}` of the smallest window under the pointer per Sway `get_tree` |
 | `key` | `key, state, mods, dev` | `key` = evdev name lowercased without `KEY_` (`a`, `enter`, `leftshift`); `mods` = subset of `["ctrl","alt","shift","super"]` held *before* this press (so `leftctrl` down has `mods: []`); key repeats are not logged; absent entirely with `rec --no-keys` |
 | `focus` | `con_id, app_id, title, rect` | Sway focus changed to this window; `rect` = `[x, y, w, h]` output px (container rect incl. title bar); `app_id` may be `null` for Xwayland (then `class` is present). `rec` writes one at `t = 0` for the initially focused window and never logs its own preview window |
 | `window` | `change, con_id, rect` | `change` ∈ `new, close` for any window; `move, floating, fullscreen` for the focused window only (Sway emits no resize events) |
+| `cursor_shape` | `id, w, h, hotspot, scale` | the cursor image changed; `id` names `<shapes_dir>/<id>.png` (straight-alpha BGRA), `hotspot` is `[x, y]` in that image's pixels, `scale` the output scale it was captured at. The shape in force at time t is the last event at or before t |
+| `cursor_visible` | `visible` | the cursor entered (`true`) or left (`false`) the captured output |
 | `mark` | `label` | manual marker (`clap`, `chapter`, …) — used for sync checks and trims |
 | `stream` | `stream, event` | `event` ∈ `first_frame, stopped` — the raw evidence behind `offset_s`, appended when the recording stops (so out of `t` order); render ignores these |
 

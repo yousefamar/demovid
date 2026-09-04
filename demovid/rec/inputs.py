@@ -60,12 +60,14 @@ class InputLogger(threading.Thread):
         clock: Clock,
         cursor_pos: Callable[[], tuple[int, int] | None],
         log_keys: bool = True,
+        window_at: Callable[[tuple[int, int] | None], dict | None] | None = None,
     ):
         super().__init__(name="evdev", daemon=True)
         self.log = log
         self.clock = clock
         self.cursor_pos = cursor_pos
         self.log_keys = log_keys
+        self.window_at = window_at
         self.devices = input_devices()
         self.stop_event = threading.Event()
         self._held: dict[str, int] = {}
@@ -107,9 +109,11 @@ class InputLogger(threading.Thread):
         state = "down" if ev.value else "up"
         if ev.code in BUTTONS:
             pos = self.cursor_pos()
+            window = self.window_at(pos) if self.window_at and state == "down" else None
             self.log.emit(
                 "button", t, button=BUTTONS[ev.code], state=state,
                 x=pos[0] if pos else None, y=pos[1] if pos else None, dev=dev.name,
+                **({"window": window} if window else {}),
             )
             return
         name = key_name(ev.code)

@@ -28,6 +28,13 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                      help="dark: black arrow with white edge (macOS/Screen Studio); light: white with black edge")
     cur.add_argument("--cursor-smooth", type=float, default=0.05, help="gaussian sigma in seconds (default 0.05)")
     cur.add_argument("--no-ripple", action="store_true")
+    cur.add_argument("--synthetic-cursor", action="store_true",
+                     help="always draw the stylised arrow, even when the recording captured real cursor shapes")
+    chip = parser.add_argument_group("keystroke chips")
+    chip.add_argument("--no-chips", action="store_true")
+    chip.add_argument("--chip-hold", type=float, default=1.1, help="seconds a chip stays up (default 1.1)")
+    chip.add_argument("--all-keys", action="store_true",
+                     help="chip every key, not just shortcuts and editing keys")
     pip = parser.add_argument_group("webcam")
     pip.add_argument("--no-pip", action="store_true")
     pip.add_argument("--pip-mode", choices=["fixed", "scene"], default="fixed",
@@ -53,8 +60,9 @@ def parse_time(s: str) -> float:
 def main(ns: argparse.Namespace) -> int:
     import cv2
 
+    from demovid.render.chips import chips_from_events
     from demovid.render.compositor import Compositor, Look
-    from demovid.render.cursor import CursorTrack
+    from demovid.render.cursor import CursorTrack, ShapeTrack
     from demovid.render.media import AsyncEncoder, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration
     from demovid.render.planner import Keyframe, PlanConfig, plan
 
@@ -86,12 +94,15 @@ def main(ns: argparse.Namespace) -> int:
         Path(ns.plan_json).write_text(json.dumps([k.as_dict() for k in keyframes], indent=1))
 
     look = Look(out_w=out_w, out_h=out_h, out_scale=out_scale, cursor=not ns.no_cursor, cursor_scale=ns.cursor_scale,
-                cursor_style=ns.cursor_style,
+                cursor_style=ns.cursor_style, cursor_real=not ns.synthetic_cursor, chips=not ns.no_chips,
                 ripple=not ns.no_ripple, pip=not ns.no_pip, pip_mode=ns.pip_mode, pip_size=ns.pip_size,
                 pip_pos=ns.pip_pos, zoom_level=ns.zoom,
                 interpolation=cv2.INTER_CUBIC if ns.cubic else cv2.INTER_LINEAR)
     clicks = [(float(e["t"]), float(e["x"]), float(e["y"])) for e in events
               if e.get("kind") == "button" and e.get("state") == "down" and e.get("x") is not None]
+    shapes_name = (manifest.get("cursor") or {}).get("shapes_dir")
+    shapes = ShapeTrack(events, rec / shapes_name if shapes_name else None)
+    chips = [] if ns.no_chips else chips_from_events(events, ns.chip_hold, shortcuts_only=not ns.all_keys)
     cam = streams.get("cam") if look.pip else None
     preview_rect = cam.get("preview_rect") if cam else None
     if look.pip_mode == "scene" and not preview_rect:
@@ -114,7 +125,7 @@ def main(ns: argparse.Namespace) -> int:
                 continue
             win = 0.5
             track = CursorTrack(events, t - win, fps, int(2 * win * fps) + 1, ns.cursor_smooth)
-            comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect)
+            comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect, shapes, chips)
             reader = FrameReader(screen_path, fps, t - screen_offset, 1.5 / fps)
             feed = cam_reader(t, 1.5 / (cam.get("fps") or 30) if cam else None)
             frame = reader.read()
@@ -133,7 +144,7 @@ def main(ns: argparse.Namespace) -> int:
     out = Path(ns.out).expanduser() if ns.out else rec / ("preview.mp4" if ns.preview else "render.mp4")
     n_frames = int(round((t_to - t_from) * fps))
     track = CursorTrack(events, t_from, fps, n_frames, ns.cursor_smooth)
-    comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect)
+    comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect, shapes, chips)
 
     audio = streams.get("mic") if not ns.no_audio else None
     audio_args = {}
@@ -143,7 +154,8 @@ def main(ns: argparse.Namespace) -> int:
 
     print(f"[render] {rec.name}: {t_from:.2f}..{t_to:.2f}s, {out_w}x{out_h}@{fps:g}, {n_frames} frames, "
           f"{len(keyframes)} keyframes, cursor={'yes' if track.present and look.cursor else 'no'}, "
-          f"pip={look.pip_mode if cam else 'no'}, audio={'yes' if audio else 'no'} -> {out}", flush=True)
+          f"pip={look.pip_mode if cam else 'no'}, audio={'yes' if audio else 'no'}, "
+          f"shapes={'yes' if shapes.present and look.cursor_real else 'no'}, chips={len(chips)} -> {out}", flush=True)
     reader = Prefetcher(FrameReader(screen_path, fps, t_from - screen_offset, t_to - t_from))
     feed = cam_reader(t_from, t_to - t_from)
     enc = AsyncEncoder(Encoder(out, out_w, out_h, fps, ns.encoder, ns.quality, **audio_args))
