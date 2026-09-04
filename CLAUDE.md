@@ -25,6 +25,8 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
 - Sway IPC is a superpower the Mac tools lack: `window` focus events + `get_tree` give exact window rects → zoom-to-focused-window, not a blind box around the pointer.
 
 ## Conventions
+- **`FORMAT.md` is the contract** between `rec`, `import-screenix` and `render` (manifest.json + events.jsonl v1). Change it there first; `render` must keep reading every version ever written.
+- **Subcommands are packages** `demovid/<name>/__init__.py` exposing `add_args(parser)` + `main(ns) -> int`; `cli.py` discovers them from `SUBCOMMANDS` and is never edited by feature work. Heavy imports (cv2, av, pywayland) stay inside `main()`. `uv sync --group dev`, `uv run demovid …`, `uv run pytest`.
 - **Python 3.12 + `uv`** (decided 2026-09-03): `evdev`, `i3ipc`, `pywayland`, `numpy`/`opencv-python-headless`, `av`. ffmpeg/wf-recorder/pw-record are subprocesses, never re-implemented. **MIT** licence — framepipe is GPL-3, read it, never copy it.
 - The zoom planner is a pure function `events → keyframes`; keep it that way and unit-test it. The renderer consumes keyframes, never raw events.
 - Screenix import: `~/Videos/screenix/recording_<ts>/` has `cursor.json` (`{timestamp,x,y}` px @~120 Hz), `*.mp4.meta.json` (click events normalised 0–1), screen + camera mp4s — a free regression corpus; keep `demovid import-screenix` working.
