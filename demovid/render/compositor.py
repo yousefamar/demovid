@@ -118,7 +118,7 @@ class Compositor:
             M = np.array([[s, 0, tx], [0, s, ty]], dtype=np.float64)
             out = cv2.warpAffine(frame, M, (L.out_w, L.out_h), flags=L.interpolation, borderMode=cv2.BORDER_CONSTANT)
 
-        if self.cursor is not None and self.cursor.present and L.cursor:
+        if self.cursor is not None and self.cursor.present and L.cursor and self.cursor.visible_at(frame_i):
             px, py = self.cursor.at(frame_i)
             if self.refiner is not None:
                 px, py = self.refiner.refine(frame, t, (px, py))

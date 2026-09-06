@@ -22,8 +22,9 @@ def test_gaussian_smoothing_preserves_constants_and_removes_jitter():
 
 
 def test_cursor_track_interpolates_and_reports_presence():
-    events = [{"t": 0.0, "kind": "cursor", "x": 0, "y": 0}, {"t": 1.0, "kind": "cursor", "x": 100, "y": 50}]
-    track = CursorTrack(events, 0.0, 10, 11, smooth_s=0.0)
+    # samples closer together than HOLD_GAP_S interpolate; a longer gap holds (see the gap test below)
+    events = [{"t": 0.0, "kind": "cursor", "x": 0, "y": 0}, {"t": 0.05, "kind": "cursor", "x": 100, "y": 50}]
+    track = CursorTrack(events, 0.0, 200, 11, smooth_s=0.0)
     assert track.present
     assert track.at(5) == pytest.approx((50.0, 25.0))
     assert not CursorTrack([{"t": 0, "kind": "button"}], 0.0, 10, 5).present
@@ -148,3 +149,22 @@ def test_padded_compositor_insets_the_content_and_keeps_aspect():
     assert out.shape == (108, 192, 3)
     assert out[0, 0].max() < 60          # background (with shadow) at the corner
     assert out[54, 96].min() > 150       # content in the middle
+
+
+def test_cursor_track_holds_position_across_gaps_and_honours_visibility():
+    from demovid.render.cursor import CursorTrack
+
+    # moves 0->100 densely, then a 2 s gap (pointer still), then continues from 500
+    ev = [{"kind": "cursor", "t": 0.0 + i * 0.01, "x": i, "y": 0} for i in range(11)]
+    ev += [{"kind": "cursor", "t": 2.1, "x": 500, "y": 0}, {"kind": "cursor", "t": 2.11, "x": 501, "y": 0}]
+    tr = CursorTrack(ev, 0.0, 60, int(2.2 * 60), smooth_s=0.0)
+    # mid-gap the drawn cursor stays where it stopped instead of gliding towards 500
+    assert abs(tr.at(int(1.0 * 60))[0] - 10) < 1.0
+    assert abs(tr.at(int(2.0 * 60))[0] - 10) < 1.0
+
+    ev += [{"kind": "cursor_visible", "t": 0.5, "visible": False},
+           {"kind": "cursor_visible", "t": 1.5, "visible": True}]
+    tr = CursorTrack(ev, 0.0, 60, int(2.2 * 60), smooth_s=0.0)
+    assert tr.visible_at(int(0.2 * 60)) is True      # before the first mark: visible
+    assert tr.visible_at(int(1.0 * 60)) is False     # compositor drew nothing here
+    assert tr.visible_at(int(2.0 * 60)) is True

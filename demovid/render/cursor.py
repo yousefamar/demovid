@@ -21,6 +21,8 @@ class CursorTrack:
     See calibrate_lag().
     """
 
+    HOLD_GAP_S = 0.08   # a gap this long is the pointer sitting still, not a slow glide
+
     def __init__(self, events: list[dict], t_start: float, fps: float, n_frames: int, smooth_s: float = 0.05,
                  lag_s: float = 0.0):
         self.t_start, self.fps, self.n_frames = t_start, fps, n_frames
@@ -28,20 +30,45 @@ class CursorTrack:
                if e.get("kind") == "cursor" and e.get("x") is not None and e.get("y") is not None]
         pts.sort()
         self.present = bool(pts)
+        frame_ts = t_start + np.arange(n_frames) / fps - lag_s
+        self.visible = self._visibility(events, frame_ts)
         if not pts:
             self.xs = self.ys = np.zeros(n_frames)
             self.first_t = self.last_t = 0.0
             return
         ts = np.array([p[0] for p in pts])
-        frame_ts = t_start + np.arange(n_frames) / fps - lag_s
         xs = np.interp(frame_ts, ts, [p[1] for p in pts])
         ys = np.interp(frame_ts, ts, [p[2] for p in pts])
+        # Samples arrive per output commit (~140/s while moving), so a long gap means the pointer did not
+        # move — interpolating across it walks the drawn cursor away from the real one. Hold instead.
+        prev = np.clip(np.searchsorted(ts, frame_ts, side="right") - 1, 0, len(ts) - 1)
+        nxt = np.minimum(prev + 1, len(ts) - 1)
+        hold = (ts[nxt] - ts[prev] > self.HOLD_GAP_S) & (frame_ts > ts[prev])
+        xs = np.where(hold, np.asarray([p[1] for p in pts])[prev], xs)
+        ys = np.where(hold, np.asarray([p[2] for p in pts])[prev], ys)
         sigma = smooth_s * fps
         self.xs, self.ys = gaussian(xs, sigma), gaussian(ys, sigma)
         self.first_t, self.last_t = ts[0], ts[-1]
 
+    @staticmethod
+    def _visibility(events: list[dict], frame_ts: np.ndarray) -> np.ndarray:
+        """Per-frame mask from `cursor_visible` events. The compositor draws no cursor while it is
+        false (pointer over a client that hid it, or off this output), so neither may we — and no
+        positions are reported either, which is what made those spans look like a slow drift."""
+        marks = sorted((float(e["t"]), bool(e.get("visible")))
+                       for e in events if e.get("kind") == "cursor_visible" and e.get("visible") is not None)
+        if not marks:
+            return np.ones(len(frame_ts), bool)
+        ts = np.array([m[0] for m in marks])
+        vals = np.array([m[1] for m in marks], bool)
+        i = np.searchsorted(ts, frame_ts, side="right") - 1
+        return np.where(i < 0, True, vals[np.clip(i, 0, len(vals) - 1)])
+
     def at(self, i: int) -> tuple[float, float]:
         return float(self.xs[i]), float(self.ys[i])
+
+    def visible_at(self, i: int) -> bool:
+        return bool(self.visible[i]) if 0 <= i < len(self.visible) else True
 
     def at_time(self, t: float) -> tuple[float, float] | None:
         i = int(round((t - self.t_start) * self.fps))
