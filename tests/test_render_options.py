@@ -89,3 +89,20 @@ def test_openai_key_falls_back_to_the_config_file(tmp_path, monkeypatch):
     assert captions.openai_key() == "sk-from-env"         # env wins
     monkeypatch.setenv("OPENAI_API_KEY", "   ")
     assert captions.openai_key() == "sk-from-file"        # blank env is not a key
+
+
+def test_recorded_spans_and_span_selection():
+    from demovid.render import fmt_time
+    from demovid.render.timing import parse_span_list, recorded_spans
+
+    ev = [{"t": 285.8, "kind": "pause"}, {"t": 1061.3, "kind": "resume"},
+          {"t": 1203.0, "kind": "pause"}, {"t": 6648.1, "kind": "resume"}]      # resume written at stop
+    spans = recorded_spans(ev, 0.3, 6648.1)
+    assert [(round(a, 1), round(b, 1)) for a, b in spans] == [(0.3, 285.8), (1061.3, 1203.0)]  # no 0-length tail
+    assert parse_span_list("1", 2) == [0] and parse_span_list("1,2", 2) == [0, 1]
+    assert parse_span_list("2-4", 5) == [1, 2, 3]
+    with pytest.raises(ValueError):
+        parse_span_list("3", 2)
+    with pytest.raises(ValueError):
+        parse_span_list("x", 2)
+    assert fmt_time(285.8) == "4:45.8" and fmt_time(0.3) == "0.3s" and fmt_time(600.04) == "10:00.0"

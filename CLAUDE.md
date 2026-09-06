@@ -47,7 +47,9 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   recording → PAUSE immediately, no UI; paused → menu with Resume first, then Stop.** That is `demovid menu
   --click`; plain `demovid menu` always shows the menu. Pause = `SIGUSR1` to the daemon → a `pause`/`resume`
   event pair (FORMAT.md), nothing stops, `render` cuts the span; while paused `key`/`button` events are not
-  written (passwords). Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
+  written (passwords). The stretches between pauses are numbered "spans": `render --spans` lists them,
+  `--keep 1` / `--drop 2` select by number (unwanted spans become cuts like pauses and the range shrinks to
+  the kept extremes) — this is how to throw away a take without reading events.jsonl. Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
   (~79 ms); `rec` sends `SIGRTMIN+9` on start/stop so it updates instantly. Config points at the script in the
   MAIN checkout so a deleted worktree cannot break the bar. **Two traps, both cost an hour:** (1) waybar's
   SIGUSR2 reload does NOT reliably restart a custom module — it silently stops running the `exec`, and

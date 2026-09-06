@@ -37,6 +37,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     idle.add_argument("--idle-max", type=float, default=1.5, help="a sped-up stretch never lasts longer than this (s)")
     idle.add_argument("--idle-ignore-speech", action="store_true", help="speed up even while the mic hears talking")
     idle.add_argument("--keep-pauses", action="store_true", help="do not cut the spans where rec was paused")
+    spans = parser.add_argument_group("recorded spans (the stretches between pauses, numbered from 1)")
+    spans.add_argument("--spans", action="store_true", help="list the spans with their times and exit")
+    spans.add_argument("--keep", metavar="N[,M|-M]", help="render only these spans, e.g. 1 or 1,3 or 2-4")
+    spans.add_argument("--drop", metavar="N[,M|-M]", help="render everything except these spans")
     frame = parser.add_argument_group("background frame")
     frame.add_argument("--pad", type=float, default=0.0, help="inset the screen on a background, fraction of height (0 = off)")
     frame.add_argument("--bg", default="#141414", help="'#rrggbb', '#rrggbb,#rrggbb' gradient, or an image path")
@@ -102,6 +106,11 @@ def parse_time(s: str) -> float:
     return float(s)
 
 
+def fmt_time(t: float) -> str:
+    m, s = divmod(t, 60)
+    return f"{int(m)}:{s:04.1f}" if m else f"{s:.1f}s"
+
+
 def parse_rect(s: str) -> tuple[int, int, int, int]:
     parts = [int(float(p)) for p in s.replace("x", ",").split(",")]
     if len(parts) != 4 or parts[2] <= 0 or parts[3] <= 0:
@@ -119,7 +128,8 @@ def main(ns: argparse.Namespace) -> int:
     from demovid.render.media import (AsyncEncoder, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration,
                                       silences)
     from demovid.render.planner import Keyframe, PlanConfig, plan
-    from demovid.render.timing import IdleConfig, TimeMap, compress, cuts, idle_intervals, paused_intervals, subtract
+    from demovid.render.timing import (IdleConfig, TimeMap, compress, cuts, idle_intervals, parse_span_list,
+                                       paused_intervals, recorded_spans, subtract)
 
     if ns.list_presets:
         print(presets.describe())
@@ -162,6 +172,27 @@ def main(ns: argparse.Namespace) -> int:
     # spans where rec was paused are cut from the output; nothing that happened inside them may drive
     # the zoom, ripples or chips either (a click while paused must not leave the render zoomed in)
     paused = [] if (ns.keep_pauses or ns.still) else paused_intervals(events, t_from, t_to)
+    spans = recorded_spans(events, t_from, t_to)
+    if ns.spans:
+        for i, (a, b) in enumerate(spans, 1):
+            print(f"span {i}: {fmt_time(a)} -> {fmt_time(b)}  ({b - a:.1f}s)")
+        print(f"{len(spans)} span(s); `--keep 1` or `--drop 2` select by number")
+        return 0
+    if ns.keep or ns.drop:
+        try:
+            chosen = set(parse_span_list(ns.keep, len(spans))) if ns.keep else set(range(len(spans)))
+            chosen -= set(parse_span_list(ns.drop, len(spans))) if ns.drop else set()
+        except ValueError as e:
+            raise SystemExit(f"render: {e}")
+        if not chosen:
+            raise SystemExit("render: --keep/--drop left nothing to render")
+        # unwanted spans become cuts, exactly like pauses; the range shrinks to the kept extremes
+        dropped = [spans[i] for i in range(len(spans)) if i not in chosen]
+        paused = sorted(paused + dropped)
+        t_from, t_to = spans[min(chosen)][0], spans[max(chosen)][1]
+        paused = [(max(a, t_from), min(b, t_to)) for a, b in paused if min(b, t_to) > max(a, t_from)]
+        print(f"[spans] keeping {', '.join(str(i + 1) for i in sorted(chosen))} of {len(spans)}: "
+              f"{fmt_time(t_from)} -> {fmt_time(t_to)}")
     live_events = [e for e in events if not any(a <= float(e.get("t", 0.0)) < b for a, b in paused)] if paused else events
 
     if ns.no_zoom:

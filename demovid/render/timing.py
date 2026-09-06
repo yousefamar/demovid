@@ -102,6 +102,31 @@ def cuts(intervals: list[tuple[float, float]]) -> list[Segment]:
     return [Segment(a, b, CUT) for a, b in intervals]
 
 
+def recorded_spans(events: list[dict], t_from: float, t_to: float) -> list[tuple[float, float]]:
+    """The stretches between pauses, in order — what `render --spans` numbers from 1. Zero-length
+    spans (a resume written at stop) are dropped."""
+    spans = subtract([(t_from, t_to)], paused_intervals(events, t_from, t_to))
+    return [(a, b) for a, b in spans if b - a > 0.05]
+
+
+def parse_span_list(spec: str, n: int) -> list[int]:
+    """'1,3' or '2-4' → 0-based indices, validated against n spans."""
+    out: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        try:
+            a, b = int(lo), int(hi or lo)
+        except ValueError:
+            raise ValueError(f"bad span {part!r}; use numbers from `render --spans`, e.g. 1,3 or 2-4")
+        if not (1 <= a <= b <= n):
+            raise ValueError(f"span {part!r} out of range: this recording has {n} span(s)")
+        out.extend(range(a - 1, b))
+    return sorted(set(out))
+
+
 def subtract(intervals: list[tuple[float, float]], holes: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """intervals minus holes, both sorted lists of (a, b)."""
     out: list[tuple[float, float]] = []
