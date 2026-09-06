@@ -120,7 +120,8 @@ def checks(out_root: Path) -> list[tuple[str, str, str]]:
         res.append((WARN, "cursor protocol", f"wayland probe failed: {e}"))
 
     res.append((OK if wf_supports_no_cursor() else WARN, "wf-recorder --no-cursor",
-                "supported: the cursor can be left out of the frames" if wf_supports_no_cursor()
+                "supported: screencopy skips the cursor overlay so position tracking keeps working "
+                "(the software cursor is still painted into the frames)" if wf_supports_no_cursor()
                 else "unpatched build: the cursor overlay is forced, which disables cursor tracking "
                      "(see CLAUDE.md for the ~/src/wf-recorder-0.5.0 patch)"))
 
