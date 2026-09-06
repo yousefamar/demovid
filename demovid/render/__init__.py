@@ -67,9 +67,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     cap.add_argument("--captions-lang", metavar="ISO", help="force the language (default: auto)")
     pip = parser.add_argument_group("webcam")
     pip.add_argument("--no-pip", action="store_true")
-    pip.add_argument("--pip-mode", choices=["auto", "fixed", "scene"], default="auto",
-                     help="auto: cover the recorded preview window while it is in view, fixed corner otherwise; "
-                          "fixed: always the output corner; scene: always over the preview, zooms with the content")
+    pip.add_argument("--pip-mode", choices=["fixed", "scene"], default="fixed",
+                     help="fixed (default): a corner of the output, never moving; the recorded preview window is "
+                          "erased from the frame instead. scene: paste the camera over the recorded preview, so it "
+                          "zooms and travels with the content")
     pip.add_argument("--pip-shape", choices=["squircle", "rounded", "circle"], default="squircle")
     pip.add_argument("--pip-size", type=float, default=0.15, help="fraction of output width (default 0.15)")
     pip.add_argument("--pip-pos", choices=["br", "bl", "tr", "tl"], default="br")

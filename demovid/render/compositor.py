@@ -12,6 +12,7 @@ from demovid.render.cursor import CursorTrack, ShapeTrack, blend, draw_cursor, d
 from demovid.render.planner import Keyframe, state_at
 
 SUPERSAMPLE = 4
+WORK_PX = 96      # erase_box builds its fill at this resolution (see erase_box)
 
 
 @dataclass
@@ -31,14 +32,14 @@ class Look:
     ripple_s: float = 0.45
     ripple_px: float = 34.0
     pip: bool = True
-    pip_mode: str = "auto"        # auto: cover the recorded preview while it is in view, else fixed corner;
-                                  # fixed: always the output corner; scene: always over preview_rect in the source
+    pip_mode: str = "fixed"       # fixed: a corner of the output, never moving (the recorded preview is erased
+                                  # from the source instead); scene: pasted over preview_rect, zooms with it
     pip_size: float = 0.15        # fraction of output width (layout.PIP_FRAC)
     pip_pos: str = "br"
     pip_margin: float = 0.02      # fraction of output width, imports only (recordings use layout.MARGIN_PX)
     pip_shape: str = "squircle"   # squircle | rounded | circle
     pip_radius: float = 0.22      # corner radius for `rounded`, fraction of pip size
-    pip_shrink: float = 0.10      # fixed PiP shrinks by this at full zoom
+    pip_shrink: float = 0.0       # shrink at full zoom; 0 so the camera is identical on every frame
     zoom_level: float = 1.8       # planner's zoom, for the shrink ramp
     interpolation: int = cv2.INTER_LINEAR
     pad: float = 0.0              # background frame: padding as a fraction of output height (0 = none)
@@ -93,14 +94,17 @@ class Compositor:
         s = zoom * self.scale
         tx, ty = self.cx0 - cx * s, self.cy0 - cy * s
 
-        # camera, part 1: paint it INTO the source over the recorded preview window when that window
-        # is going to be in view (always at zoom 1), so the frames never show two cameras
+        # The live preview window is baked into every frame. Erase it from the SOURCE (so it zooms
+        # away with the content) and draw the real camera at a fixed output corner that never moves.
+        # `scene` keeps the old behaviour of pasting the camera itself into the source.
         cover = False
-        if cam is not None and L.pip and self.pip_box_src is not None and L.pip_mode in ("auto", "scene"):
+        if L.pip and self.pip_box_src is not None:
             bx, by, bs = self.pip_box_src
-            if L.pip_mode == "scene" or self.in_view((bx, by, bs, bs), cx, cy, zoom):
+            if cam is not None and L.pip_mode == "scene":
                 self.paste_pip(frame, cam, [bx, by, bs, bs])
                 cover = True
+            elif self.in_view((bx, by, bs, bs), cx, cy, zoom):
+                erase_box(frame, self.pip_box_src)
 
         if self.bg is not None:
             x0, y0, w, h = self.content
@@ -136,8 +140,8 @@ class Compositor:
             else:
                 draw_cursor(out, ox, oy, size * squash, L.cursor_style)
 
-        # camera, part 2: fixed corner of the output while the recorded preview is out of view
-        if cam is not None and L.pip and not cover and L.pip_mode in ("auto", "fixed"):
+        # camera, part 2: a fixed output corner, identical on every frame — it must never travel with a zoom
+        if cam is not None and L.pip and not cover:
             ramp = min(max((zoom - 1) / max(L.zoom_level - 1, 1e-6), 0.0), 1.0)
             shrink = 1 - L.pip_shrink * ramp
             if self.pip_box_src is not None:
@@ -183,6 +187,40 @@ class Compositor:
         mask, shadow, pad = shape_mask(w, h, self.look.pip_shape, self.look.pip_radius)
         blend(dst, np.zeros((*shadow.shape, 3), np.uint8), shadow, x - pad, y - pad + int(0.03 * h))
         blend(dst, tile, mask, x, y)
+
+
+def erase_box(frame: np.ndarray, box: tuple[int, int, int], feather: int = 12) -> None:
+    """Hide the recorded preview window in-place, in source pixels.
+
+    The desktop behind it was never captured, so there is nothing to restore: inpaint it from the
+    surrounding pixels (a flat fill reads as an obvious rectangle over textured content). An anonymous
+    smear beats a stale copy of the camera — and unlike pasting the live camera here it never moves
+    when the view zooms.
+    """
+    x, y, s = (int(round(v)) for v in box)
+    H, W = frame.shape[:2]
+    pad = max(8, feather)
+    rx0, ry0 = max(0, x - pad), max(0, y - pad)
+    rx1, ry1 = min(W, x + s + pad), min(H, y + s + pad)
+    if rx1 - rx0 < 4 or ry1 - ry0 < 4:
+        return
+    roi = frame[ry0:ry1, rx0:rx1]
+    rh, rw = roi.shape[:2]
+    mask = np.zeros((rh, rw), np.uint8)
+    mx0, my0 = max(0, x - rx0), max(0, y - ry0)
+    mask[my0:my0 + s, mx0:mx0 + s] = 255
+    # The result is a smooth colour field, so build it on a thumbnail: inpaint follows the local
+    # structure (grass above, soil below still read correctly) and the blur kills its radial streaks.
+    # Full resolution here costs 5x the render time for a field nobody can tell apart.
+    f = min(1.0, WORK_PX / max(rw, rh))
+    sw, sh = max(8, int(rw * f)), max(8, int(rh * f))
+    small = cv2.resize(roi, (sw, sh), interpolation=cv2.INTER_AREA)
+    small_mask = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
+    filled = cv2.inpaint(small, small_mask, 3, cv2.INPAINT_TELEA)
+    soft = cv2.GaussianBlur(filled, (0, 0), max(1.0, sw / 12))
+    soft = cv2.resize(soft, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), max(1.5, feather / 2))
+    roi[:] = (roi * (1 - alpha[..., None]) + soft * alpha[..., None]).astype(np.uint8)
 
 
 def background(spec: str, w: int, h: int) -> np.ndarray:

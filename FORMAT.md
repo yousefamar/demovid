@@ -76,7 +76,9 @@ Rules:
 
 ## Webcam PiP vs the live preview window
 
-The preview window is in every frame of `screen.mp4`, so a camera drawn anywhere else shows two cameras. `render --pip-mode auto` (default) therefore paints the camera *into the source frame* over `pip_for_preview(preview_rect)` — a squircle slightly larger than the recorded square window — whenever that region intersects the current crop (always at zoom 1), and only when the zoom has moved it out of view does it draw the camera in the fixed output corner instead (same place, so the hand-over is a small pop, never a double). `--pip-mode scene` always paints into the source (the camera zooms with the content and can leave the frame); `--pip-mode fixed` always uses the corner (imports, or when there was no preview).
+The preview window is in every frame of `screen.mp4`, so a camera drawn anywhere else would show two cameras. **`--pip-mode fixed` (default): the camera is drawn in a fixed output corner — identical on every frame, never travelling or resizing with a zoom — and the recorded preview window is *erased* from the source frame instead** (`erase_box`: inpaint from the surrounding pixels, blurred into a smooth colour field, built at 96 px because full resolution costs 5× the render time for the same result). At zoom 1 the corner square coincides exactly with the erased region (`demovid/layout.py` guarantees it), so nothing shows; when a zoom lands on that corner the erased patch is visible as a soft smudge — the accepted price of a camera that never moves.
+
+Earlier versions had an `auto` mode that painted the camera into the source while the preview region was in view and swapped to the corner when it left. It hid the patch perfectly but made the camera drift with the content and then jump at the hand-over (4 switches in a 38 s clip, at zoom 1.28–1.8) — removed 2026-09-06 on Yousef's report. `--pip-mode scene` still paints into the source deliberately (the camera zooms and travels with the content).
 
 ## Screenix import
 

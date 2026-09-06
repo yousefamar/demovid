@@ -168,3 +168,16 @@ def test_cursor_track_holds_position_across_gaps_and_honours_visibility():
     assert tr.visible_at(int(0.2 * 60)) is True      # before the first mark: visible
     assert tr.visible_at(int(1.0 * 60)) is False     # compositor drew nothing here
     assert tr.visible_at(int(2.0 * 60)) is True
+
+
+def test_erase_box_removes_the_preview_and_leaves_its_surroundings():
+    from demovid.render.compositor import erase_box
+
+    frame = np.zeros((300, 300, 3), np.uint8)
+    frame[:, :] = (40, 90, 40)                 # background
+    frame[100:200, 100:200] = (10, 10, 240)    # the recorded preview window
+    before_outside = frame[0:80, 0:80].copy()
+    erase_box(frame, (100, 100, 100))
+    box = frame[110:190, 110:190].astype(int)
+    assert abs(box[..., 2].mean() - 240) > 60          # the red-channel blob is gone
+    assert np.array_equal(frame[0:80, 0:80], before_outside)   # outside the padded ROI is untouched
