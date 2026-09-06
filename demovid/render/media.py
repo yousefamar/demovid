@@ -106,7 +106,10 @@ class Prefetcher:
 
     def _run(self) -> None:
         while True:
-            frame = self.reader.read()
+            try:
+                frame = self.reader.read()
+            except (ValueError, OSError):  # close() shut the pipe under us: the render already has every frame it wanted
+                frame = None
             self.q.put(frame)
             if frame is None:
                 return
