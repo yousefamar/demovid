@@ -135,3 +135,65 @@ def test_menu_pick_rejects_an_unknown_entry(monkeypatch, capsys):
     monkeypatch.setattr(menu, "latest", lambda: None)
     ns = argparse.Namespace(print=False, pick="toggle:nothing", lines=11, click=False)
     assert menu.main(ns) == 1
+
+
+@pytest.fixture(autouse=True)
+def isolated_render_prefs(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs, "RENDER_PATH", tmp_path / "render.json")
+
+
+def test_render_settings_defaults_and_flags():
+    assert prefs.render_load()["zoom"] == 1.8 and prefs.render_load()["padding"] == prefs.OFF
+    flags = prefs.render_flags()
+    assert "--zoom" in flags and "1.8" in flags
+    assert "--pad" not in flags            # no margins by default
+    assert "--no-pip" not in flags and "--pip-pos" in flags
+
+
+def test_render_settings_cycle_round_trips_and_changes_the_flags():
+    assert prefs.render_cycle("zoom") == 2.0          # 1.8 -> 2.0
+    assert json.loads(prefs.RENDER_PATH.read_text())["zoom"] == 2.0
+    assert "2" in prefs.render_flags()
+    for _ in range(4):                                 # wrap around to "off"
+        if prefs.render_cycle("zoom") == prefs.OFF:
+            break
+    assert prefs.render_load()["zoom"] == prefs.OFF
+    assert "--no-zoom" in prefs.render_flags() and "--zoom" not in prefs.render_flags()
+
+
+def test_render_settings_off_values_map_to_the_right_flags():
+    while prefs.render_cycle("camera") != prefs.OFF:
+        pass
+    while prefs.render_cycle("idle_speed") != prefs.OFF:
+        pass
+    prefs.render_save({**prefs.render_load(), "chips": False, "captions": True, "padding": 0.06})
+    flags = prefs.render_flags()
+    assert "--no-pip" in flags and "--no-chips" in flags and "--captions" in flags
+    assert flags[flags.index("--idle-speed") + 1] == "0"
+    assert flags[flags.index("--pad") + 1] == "0.06"
+
+
+def test_render_settings_ignores_a_garbage_file():
+    prefs.RENDER_PATH.write_text('{"zoom": "enormous", "camera": "bl"}')
+    values = prefs.render_load()
+    assert values["zoom"] == 1.8 and values["camera"] == "bl"
+
+
+def test_settings_submenu_entries_are_ascii_and_cycle_actions(monkeypatch):
+    monkeypatch.setattr(menu, "latest", lambda: None)
+    assert ("settings") in [a for _, a in menu.entries()]
+    assert any("Render settings" in label for label, _ in menu.entries())
+    items = menu.render_entries()
+    assert [a for _, a in items][-1] == "back"
+    assert all(a.startswith("cycle:") for _, a in items[:-1])
+    assert "Zoom: 1.8x" in items[0][0] and "Camera: bottom right" in items[3][0]
+    for label, _ in items:
+        assert all(ord(c) < 128 or 0xE000 <= ord(c) <= 0xF8FF for c in label)
+
+
+def test_pick_reaches_a_settings_entry(monkeypatch):
+    monkeypatch.setattr(menu, "latest", lambda: None)
+    monkeypatch.setattr(menu, "notify", lambda body: None)
+    ns = argparse.Namespace(print=False, pick="cycle:captions", lines=11, click=False)
+    assert menu.main(ns) == 0
+    assert prefs.render_load()["captions"] is True

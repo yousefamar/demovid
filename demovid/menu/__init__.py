@@ -15,9 +15,13 @@ KITTY = Path("~/.local/kitty.app/bin/kitty").expanduser()
 # stripped by some tooling, which then looks like a missing font glyph. Keep this file pure ASCII.
 ICONS = {"start": "\uf04b", "stop": "\uf04d", "pause": "\uf04c", "resume": "\uf04b", "cam": "\uf03d", "preview": "\uf030", "mic": "\uf130",
          "keys": "\uf11c", "hide_cursor": "\uf245", "render": "\uf008", "upload": "\uf093",
-         "open": "\uf07b", "doctor": "\uf0f1"}
+         "open": "\uf07b", "doctor": "\uf0f1", "settings": "\uf013", "back": "\uf053"}
 LABELS = {"cam": "Camera", "preview": "Preview window", "mic": "Microphone", "keys": "Keystrokes",
           "hide_cursor": "Hide real cursor"}
+# render-settings glyphs: search, clock, mouse-pointer, video-camera, keyboard, closed-captioning,
+# forward, picture-o
+RENDER_ICONS = {"zoom": "\uf002", "zoom_hold": "\uf017", "cursor_scale": "\uf245", "camera": "\uf03d",
+                "chips": "\uf11c", "captions": "\uf20a", "idle_speed": "\uf04e", "padding": "\uf03e"}
 
 
 def add_args(p: argparse.ArgumentParser) -> None:
@@ -55,7 +59,20 @@ def entries() -> list[tuple[str, str]]:
         if newest_render(last):
             out.append((f"{ICONS['upload']}  Upload {newest_render(last).name}", "upload"))
         out.append((f"{ICONS['open']}  Open {last.name}", "open"))
+    out.append((f"{ICONS['settings']}  Render settings...", "settings"))
     out.append((f"{ICONS['doctor']}  Run doctor", "doctor"))
+    return out
+
+
+def render_entries() -> list[tuple[str, str]]:
+    """The Render settings submenu: one line per knob, picking it steps to the next value."""
+    from demovid import prefs
+
+    values = prefs.render_load()
+    out = [(f"{RENDER_ICONS.get(name, ICONS['settings'])}  {spec['label']}: "
+            f"{prefs.render_display(name, values[name])}", f"cycle:{name}")
+           for name, spec in prefs.RENDER_SPEC.items()]
+    out.append((f"{ICONS['back']}  Back", "back"))
     return out
 
 
@@ -103,9 +120,15 @@ def run(action: str) -> int:
         notify(f"{LABELS[name]}: {'on' if value else 'off'}"
                + (" (from the next recording)" if name != "hide_cursor" else ""))
         return 0
+    if action.startswith("cycle:"):
+        name = action.split(":", 1)[1]
+        value = prefs.render_cycle(name)
+        notify(f"{prefs.RENDER_SPEC[name]['label']}: {prefs.render_display(name, value)}")
+        return 0
     last = latest()
     if action == "render" and last:
-        in_terminal(["render", str(last), "--preset", "studio"])
+        # the saved settings go on as explicit flags, so they beat the preset
+        in_terminal(["render", str(last), "--preset", "studio", *prefs.render_flags()])
         return 0
     if action == "upload" and last:
         target = newest_render(last)
@@ -124,6 +147,24 @@ def run(action: str) -> int:
     return 1
 
 
+def pick_one(items: list[tuple[str, str]], lines: int, prompt: str) -> str | None:
+    """Show fuzzel; returns the chosen action, or None if it was dismissed."""
+    chosen = subprocess.run(["fuzzel", "--dmenu", "--lines", str(lines), "--width", "34", "--prompt", prompt],
+                            input="\n".join(label for label, _ in items), capture_output=True, text=True)
+    picked = chosen.stdout.strip()
+    return next((action for label, action in items if label == picked), None)
+
+
+def settings_menu(lines: int) -> int:
+    """Cycle render settings until dismissed — one pick per value change, menu stays open."""
+    while True:
+        items = render_entries()
+        action = pick_one(items, min(lines, len(items)), "render  ")
+        if action is None or action == "back":
+            return 0
+        run(action)
+
+
 def main(ns: argparse.Namespace) -> int:
     if ns.click:
         from demovid.rec import status
@@ -135,9 +176,11 @@ def main(ns: argparse.Namespace) -> int:
     if ns.print:
         for label, action in items:
             print(f"{action}\t{label}")
+        for label, action in render_entries():
+            print(f"{action}\t{label}")
         return 0
     if ns.pick:
-        for label, action in items:
+        for label, action in items + render_entries():
             if label == ns.pick or action == ns.pick:
                 return run(action)
         print(f"no menu entry {ns.pick!r}", file=sys.stderr)
@@ -145,14 +188,9 @@ def main(ns: argparse.Namespace) -> int:
     if not shutil.which("fuzzel"):
         print("fuzzel is not installed", file=sys.stderr)
         return 1
-    chosen = subprocess.run(["fuzzel", "--dmenu", "--lines", str(ns.lines), "--width", "34",
-                             "--prompt", "demovid  "],
-                            input="\n".join(label for label, _ in items),
-                            capture_output=True, text=True)
-    picked = chosen.stdout.strip()
-    if not picked:
+    action = pick_one(items, ns.lines, "demovid  ")
+    if action is None:
         return 0
-    for label, action in items:
-        if label == picked:
-            return run(action)
-    return 0
+    if action == "settings":
+        return settings_menu(ns.lines)
+    return run(action)

@@ -60,6 +60,12 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   five capture toggles, then render/upload/open the newest recording and `doctor`. Long jobs open in kitty
   with `--hold` so he can watch them. `--print` dumps the menu for tests, `--pick <action|label>` runs one
   entry without UI. Menu labels must stay unique: `--pick` matches on them.
+- **Render settings live in the menu too** (`Render settings...` → a submenu that stays open, one pick steps
+  a value): zoom, zoom hold, cursor size, camera corner/off, chips, captions, idle speed-up, padding. Stored
+  in `~/.config/demovid/render.json` (`prefs.RENDER_SPEC` = the value cycles; `prefs.render_flags()` turns
+  them into CLI flags) and passed to `render` as EXPLICIT flags after `--preset studio`, so they beat the
+  preset and there is one obvious precedence: typed flag > menu setting > preset > default. Knobs not in the
+  cycle list stay a flag or `presets.toml` job.
 - **`demovid/layout.py` is the single source of camera geometry** for `rec` (live preview window) and
   `render` (PiP): PiP side 15 % of the width, 12 px from the WORK AREA's right/bottom edges (`output.workarea`
   in the manifest = a visible workspace's rect, i.e. above waybar), preview = a square 0.80× the PiP side,
