@@ -10,7 +10,11 @@ USER_FILE = Path(CONFIG_DIR).expanduser() / "presets.toml"
 
 # keys are argparse dests of `demovid render`; a preset only sets what the command line left at its default
 BUILTIN: dict[str, dict] = {
+    # studio is what the bar menu renders with: full-bleed, no padding frame (his call, 2026-09-06)
     "studio": {
+        "idle_speed": 8.0, "captions": False,
+    },
+    "framed": {
         "pad": 0.06, "bg": "#1c1b33,#4b2a7a", "radius": 0.018,
         "idle_speed": 8.0, "captions": False,
     },
