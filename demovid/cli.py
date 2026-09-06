@@ -11,6 +11,7 @@ SUBCOMMANDS = {
     "render": ("demovid.render", "Render a recording dir into a demo mp4"),
     "upload": ("demovid.upload", "Upload an mp4 to YouTube (unlisted) and copy the URL"),
     "import-screenix": ("demovid.screenix", "Convert a Screenix recording dir into demovid's layout"),
+    "menu": ("demovid.menu", "The waybar button's right-click menu (start/stop, capture toggles, follow-ups)"),
     "doctor": ("demovid.doctor", "Check machine prerequisites; --restore undoes a crashed rec"),
 }
 

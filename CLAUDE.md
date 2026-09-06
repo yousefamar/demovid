@@ -41,7 +41,26 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
 - **Presets** (`render --preset NAME`, `--list-presets`): built-ins in `render/presets.py`, user overrides in `~/.config/demovid/presets.toml`. A preset only sets options the user did not type — `explicit_dests()` reads `sys.argv`, because comparing to the argparse default cannot tell `--idle-speed 0` from an absent flag. **Presets must never change the frozen taste defaults** (`--zoom`, `--zoom-hold`, `--pip-mode`, `--cursor-style`) until Yousef takes roadmap decision 8.
 - **Region output** (`render --crop X,Y,W,H` / `--window NAME`): crops the source, shifts every event and the `preview_rect` into that frame (pointer events outside are dropped) and plans zoom inside it. No capture-time region recording (see the Sway 1.12 note above).
 - **Console island**: `demovid/island.py` writes `~/.config/console/canvas/islands/demovid.{html,json}` (recent recordings + renders + upload links); `render` and `upload` refresh it on success, `python -m demovid.island` does it by hand. The hub live-reloads on write.
-- **Waybar**: `scripts/waybar-demovid` (plain sh + jq, ~1 ms) reads the state file directly instead of spawning Python every second (~79 ms), and `rec` sends `SIGRTMIN+9` on start/stop for an instant update. The module in `~/.config/waybar/config` points at the script in the MAIN checkout, so it keeps working when a worktree is deleted.
+- **The waybar button** (`scripts/waybar-demovid`, module `custom/demovid`, sits just left of the tray): a dim
+  camera glyph when idle, red `\u25cf m:ss` while recording; left-click toggles `rec`, right-click opens
+  `demovid menu`. Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
+  (~79 ms); `rec` sends `SIGRTMIN+9` on start/stop so it updates instantly. Config points at the script in the
+  MAIN checkout so a deleted worktree cannot break the bar. **Two traps, both cost an hour:** (1) waybar's
+  SIGUSR2 reload does NOT reliably restart a custom module — it silently stops running the `exec`, and
+  `pkill -x waybar` does not respawn it either (sway only launches `swaybar_command` at startup), so apply
+  changes with `swaymsg reload`; (2) never write a literal Private Use Area glyph into a file from an agent
+  session — some tooling strips it silently, and the symptom (nothing renders, everything else fine) looks
+  exactly like a missing font glyph. Write `\uXXXX` in Python and `$(printf '\357\200\275')` in sh, and
+  check coverage with `fc-list ':charset=f03d'`, not by rendering (PIL's `.notdef` box counts as a hit).
+- **`demovid menu`** (`demovid/menu/`): the right-click menu, `fuzzel --dmenu` (his launcher). Start/stop,
+  five capture toggles, then render/upload/open the newest recording and `doctor`. Long jobs open in kitty
+  with `--hold` so he can watch them. `--print` dumps the menu for tests, `--pick <action|label>` runs one
+  entry without UI. Menu labels must stay unique: `--pick` matches on them.
+- **`demovid/prefs.py`**: sticky `rec` defaults (`cam`, `preview`, `mic`, `keys`, `hide_cursor`) in
+  `~/.config/demovid/prefs.json`, which the menu toggles. A pref is only a DEFAULT — `rec` takes both
+  polarities (`--cam`/`--no-cam`, `--keys`/`--no-keys`, `--hide-cursor`/`--show-cursor`, all defaulting to
+  `None`) so an explicit flag always wins. The bar's tooltip lists whatever is off, so a muted mic cannot
+  surprise him mid-demo.
 - **Render overlays** live in `render/cursor.py` (`CursorTrack` positions, `ShapeTrack` + `draw_shape` for compositor-captured cursor images, synthetic arrow fallback) and `render/chips.py` (keystroke pills, PIL text on DejaVu Sans Bold — the only local font with ⌘ ⇧ ⌫ ⏎). `--synthetic-cursor` forces the stylised arrow; `--no-chips` / `--all-keys` / `--chip-hold` tune chips. Real-shape rendering is testable without a recording: `tests/xcursor.py` reads theme cursor files into the same BGRA the protocol delivers.
 - **`FORMAT.md` is the contract** between `rec`, `import-screenix` and `render` (manifest.json + events.jsonl v1). Change it there first; `render` must keep reading every version ever written.
 - **Subcommands are packages** `demovid/<name>/__init__.py` exposing `add_args(parser)` + `main(ns) -> int`; `cli.py` discovers them from `SUBCOMMANDS` and is never edited by feature work. Heavy imports (cv2, av, pywayland) stay inside `main()`. `uv sync --group dev`, `uv run demovid …`, `uv run pytest`.
