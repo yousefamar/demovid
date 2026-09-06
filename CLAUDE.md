@@ -42,8 +42,12 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
 - **Region output** (`render --crop X,Y,W,H` / `--window NAME`): crops the source, shifts every event and the `preview_rect` into that frame (pointer events outside are dropped) and plans zoom inside it. No capture-time region recording (see the Sway 1.12 note above).
 - **Console island**: `demovid/island.py` writes `~/.config/console/canvas/islands/demovid.{html,json}` (recent recordings + renders + upload links); `render` and `upload` refresh it on success, `python -m demovid.island` does it by hand. The hub live-reloads on write.
 - **The waybar button** (`scripts/waybar-demovid`, module `custom/demovid`, sits just left of the tray): a dim
-  camera glyph when idle, red `\u25cf m:ss` while recording; a click opens `demovid menu`, which has
-  start/stop as its first entry (Yousef's call: one button, one gesture, no hidden right-click). Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
+  camera glyph when idle, red `\u25cf m:ss` while recording, amber `\u23f8 m:ss` while paused (the counter
+  excludes paused time). **Click semantics (Yousef's, 2026-09-06): idle → menu (Start is the first entry);
+  recording → PAUSE immediately, no UI; paused → menu with Resume first, then Stop.** That is `demovid menu
+  --click`; plain `demovid menu` always shows the menu. Pause = `SIGUSR1` to the daemon → a `pause`/`resume`
+  event pair (FORMAT.md), nothing stops, `render` cuts the span; while paused `key`/`button` events are not
+  written (passwords). Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
   (~79 ms); `rec` sends `SIGRTMIN+9` on start/stop so it updates instantly. Config points at the script in the
   MAIN checkout so a deleted worktree cannot break the bar. **Two traps, both cost an hour:** (1) waybar's
   SIGUSR2 reload does NOT reliably restart a custom module — it silently stops running the `exec`, and
@@ -56,6 +60,24 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   five capture toggles, then render/upload/open the newest recording and `doctor`. Long jobs open in kitty
   with `--hold` so he can watch them. `--print` dumps the menu for tests, `--pick <action|label>` runs one
   entry without UI. Menu labels must stay unique: `--pick` matches on them.
+- **`demovid/layout.py` is the single source of camera geometry** for `rec` (live preview window) and
+  `render` (PiP): PiP side 15 % of the width, 12 px from the WORK AREA's right/bottom edges (`output.workarea`
+  in the manifest = a visible workspace's rect, i.e. above waybar), preview = a square 0.80× the PiP side,
+  centred, side a multiple of 16 (odd I420 chroma planes shear the raw preview pipe — seen). The render hides
+  the recorded preview under a squircle (superellipse n=4, inscribed square 0.84) at
+  `pip_for_preview(preview_rect)` while that region is in view, and only when zoomed away draws the fixed
+  corner PiP (`--pip-mode auto`, default; the doubled-camera complaint of 2026-09-06). `--pip-shape
+  squircle|rounded|circle`.
+- **The drawn cursor is snapped onto the real one per frame** (`render/cursor.py: CursorRefiner`): cursor
+  samples and screen frames disagree by up to one sample interval (~7 ms, measured), which at 1500 px/s is
+  10+ px — enough for the recorded 24 px cursor to peek out from under the enlarged one. A masked template
+  match of the current theme shape at nominal size near the predicted spot fixes it (score ≥ 0.85, ≤ 40 px);
+  the only misses are where the pointer is clipped at the screen edge. Smoothing is 0 by default for exact
+  recordings (`cursor_source: ext-image-copy-capture`), 0.05 s for Screenix imports.
+- **Typing zooms to the last click, not the pointer** (`planner.typing_target`, `typing_anchor_s = 20`):
+  no compositor reports the caret; the click that focused the field is the best proxy. The real fix is an
+  AT-SPI caret listener (`org.a11y.Bus` is up and Brave runs with `--force-renderer-accessibility`), but
+  `python3-pyatspi` is not installed (apt, needs sudo) — a follow-up, not done.
 - **`demovid/prefs.py`**: sticky `rec` defaults (`cam`, `preview`, `mic`, `keys`, `hide_cursor`) in
   `~/.config/demovid/prefs.json`, which the menu toggles. A pref is only a DEFAULT — `rec` takes both
   polarities (`--cam`/`--no-cam`, `--keys`/`--no-keys`, `--hide-cursor`/`--show-cursor`, all defaulting to

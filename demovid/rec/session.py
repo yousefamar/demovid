@@ -32,8 +32,7 @@ class RecOptions:
     cam_fps: int = 30
     mic_source: str | None = "default"
     preview: bool = True
-    preview_size: tuple[int, int] = (384, 216)
-    preview_margin: int = 24
+    preview_size: tuple[int, int] | None = None   # None: the square demovid.layout prescribes
     hide_cursor: bool = False
     log_keys: bool = True
     notify: bool = True
@@ -44,6 +43,30 @@ class Session:
     opts: RecOptions
     stop_event: threading.Event = field(default_factory=threading.Event)
     error: str | None = None
+    # pause = a marker pair in events.jsonl, nothing else stops: the streams keep running so their
+    # clocks stay trivially in sync, and `render` cuts the [pause, resume] span out (see FORMAT.md)
+    paused_since: float | None = None
+    paused_total_s: float = 0.0
+
+    def toggle_pause(self) -> bool:
+        """Flip paused/recording; returns True when now paused. Safe to call from a signal handler."""
+        t = self.clock.now()
+        if self.paused_since is None:
+            self.paused_since = t
+            self.events.emit("pause", t)
+            self.events.muted = {"key", "button"}   # he pauses to type passwords: never log those
+            self.log(f"paused at t={t:.3f}")
+            self.notify("\u23f8 PAUSED", "click the bar button for resume / stop")
+        else:
+            self.paused_total_s += t - self.paused_since
+            self.paused_since = None
+            self.events.muted = set()
+            self.events.emit("resume", t)
+            self.log(f"resumed at t={t:.3f}")
+            self.notify("\u25cf REC", "resumed")
+        self._write_state()
+        poke_waybar()
+        return self.paused_since is not None
 
     def log(self, msg: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
@@ -101,7 +124,7 @@ class Session:
             self.log(f"camera {o.cam_device} not present, skipping cam")
         if cam_dev:
             self.streams.append(cam_stream(
-                self.dir, self.clock, cam_dev, *o.cam_size, o.cam_fps, o.preview_size if o.preview else None,
+                self.dir, self.clock, cam_dev, *o.cam_size, o.cam_fps, self._preview_geometry()[2:] if o.preview else None,
             ))
         self.mic_source = None
         if o.mic_source:
@@ -209,15 +232,19 @@ class Session:
                 "rect": self.output.relative(best.rect)}
 
     def _preview_geometry(self) -> tuple[int, int, int, int]:
-        pw, ph = self.opts.preview_size
-        x = self.output.x + self.output.width - pw - self.opts.preview_margin
-        y = self.output.y + self.output.height - ph - self.opts.preview_margin
-        return x, y, pw, ph
+        """Global (layout-space) rect of the preview window: the square inside the PiP the render draws."""
+        from demovid import layout
+
+        x, y, w, h = layout.preview_rect(self.output.width, self.output.height, self.output.workarea)
+        if self.opts.preview_size:  # explicit size: keep the layout's bottom-right anchor
+            w2, h2 = self.opts.preview_size
+            x, y, w, h = x + w - w2, y + h - h2, w2, h2
+        return self.output.x + x, self.output.y + y, w, h
 
     def _start_preview(self, cam: Stream) -> None:
         x, y, pw, ph = self._preview_geometry()
         try:
-            self.preview = Preview(cam, self.opts.preview_size, self.opts.cam_fps)
+            self.preview = Preview(cam, (pw, ph), self.opts.cam_fps)
             pid = self.preview.spawn()
         except Exception as e:
             self.preview = None
@@ -253,6 +280,8 @@ class Session:
             "pid": os.getpid(),
             "dir": str(self.dir),
             "started_at": self.clock.epoch_s,
+            "paused_since": None if self.paused_since is None else self.clock.epoch_s + self.paused_since,
+            "paused_total_s": round(self.paused_total_s, 3),
             "children": {s.name: s.pid for s in self.streams} | (
                 {"preview": self.preview.pid} if self.preview and self.preview.pid else {}),
             "restore": {"xcursor_theme": [self.theme, self.theme_size]} if self.cursor_hidden else None,
@@ -301,6 +330,10 @@ class Session:
         (self.dir / "manifest.json").write_text(json.dumps(self.manifest(stopped_at), indent=1) + "\n")
 
     def _finish(self, aborted: bool) -> Path:
+        if self.paused_since is not None:
+            self.events.emit("resume", self.clock.now())
+            self.paused_total_s += self.clock.now() - self.paused_since
+            self.paused_since = None
         t_stop = self.clock.now()
         for s in self.streams:
             s.interrupt()

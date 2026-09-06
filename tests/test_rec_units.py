@@ -109,4 +109,4 @@ def test_cli_status_when_idle(monkeypatch, tmp_path):
     from demovid import rec
 
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert rec.status() == {"recording": False, "stale": False}
+    assert rec.status() == {"recording": False, "paused": False, "stale": False}

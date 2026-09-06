@@ -186,3 +186,21 @@ def test_state_at_clamps_the_crop_inside_the_frame_during_zoom_out():
     cx, cy, z = state_at(frames, 0.5, 1920, 1080)
     assert z == 1.5 and cx == 640.0 and cy == 360.0
     assert state_at(frames, 1.0, 1920, 1080) == (960.0, 540.0, 1.0)
+
+
+def test_typing_zooms_to_the_clicked_field_not_the_wandering_mouse():
+    ev = click(5.0, 400, 700)                                   # click into a text field
+    ev += [{"t": 5.5, "kind": "cursor", "x": 1700, "y": 200}]  # mouse drifts away
+    ev += keys(6.0, "hello world")
+    frames = plan(ev, CFG)
+    cx, cy, z = st(frames, 7.5)
+    assert z > 1.5 and abs(cx - 400) < 300 and abs(cy - 700) < 200   # near the click, not near (1700, 200)
+
+
+def test_typing_falls_back_to_the_pointer_when_the_click_is_stale():
+    ev = click(5.0, 400, 700)
+    ev += [{"t": 40.0, "kind": "cursor", "x": 1500, "y": 300}]
+    ev += keys(41.0, "hello world")                             # 36 s after the click: not the same field
+    frames = plan(ev, CFG)
+    cx, cy, z = st(frames, 42.5)
+    assert z > 1.5 and abs(cx - 1500) < 300 and abs(cy - 300) < 250

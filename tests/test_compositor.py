@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from demovid.render.compositor import Compositor, Look, aspect_crop, rounded_mask
+from demovid.render.compositor import Compositor, Look, aspect_crop, shape_mask
 from demovid.render.cursor import CursorTrack, arrow_sprite, draw_cursor, draw_ripple, gaussian
 from demovid.render.planner import Keyframe
 
@@ -59,10 +59,17 @@ def test_draw_cursor_and_ripple_only_touch_their_neighbourhood():
     draw_cursor(f, W + 50, H + 50, 48)  # fully off-frame is fine
 
 
-def test_rounded_mask_and_aspect_crop():
-    mask, shadow, pad = rounded_mask(60, 60, 0.25)
+def test_shape_masks_and_aspect_crop():
+    mask, shadow, pad = shape_mask(60, 60, "rounded", 0.25)
     assert mask.shape == (60, 60) and mask[30, 30] == 1.0 and mask[0, 0] == 0.0
     assert shadow.shape == (60 + 2 * pad, 60 + 2 * pad)
+    sq, _, _ = shape_mask(100, 100, "squircle", 0.0)
+    assert sq[50, 50] == 1.0 and sq[0, 0] == 0.0 and sq[50, 0] > 0.9      # flat-ish sides, cut corners
+    # inscribed square of an n=4 squircle is 2^(-1/4) = 0.84 of the side: a 0.80 preview fits inside
+    inner = int(100 * 0.80); off = (100 - inner) // 2
+    assert sq[off:off + inner, off:off + inner].min() > 0.99
+    circ, _, _ = shape_mask(100, 100, "circle", 0.0)
+    assert circ[50, 50] == 1.0 and circ[2, 2] == 0.0 and circ[50, 1] > 0.5
     assert aspect_crop(np.zeros((720, 1280, 3), np.uint8), 100, 100).shape == (720, 720, 3)
     assert aspect_crop(np.zeros((720, 1280, 3), np.uint8), 160, 90).shape == (720, 1280, 3)
     assert aspect_crop(np.zeros((1000, 1000, 3), np.uint8), 200, 100).shape == (500, 1000, 3)

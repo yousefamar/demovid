@@ -15,8 +15,11 @@ class EventLog:
         self._lock = threading.Lock()
         self._fh = open(path, "a", buffering=1)
         self.count = 0
+        self.muted: set[str] = set()   # kinds silently dropped (key/button while paused)
 
     def emit(self, kind: str, t: float | None = None, **fields: Any) -> None:
+        if kind in self.muted:
+            return
         if t is None:
             t = self.clock.now()
         rec = {"t": round(t, 6), "kind": kind, **fields}

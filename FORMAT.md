@@ -44,7 +44,8 @@ cached whisper transcript, keyed on `mic.flac`'s size+mtime so re-renders never 
 ```
 
 - `output.x/y` are the output's position in Sway's global layout; all event coordinates are already output-relative (see below), these exist only for debugging.
-- `streams.cam.preview_rect` is `[x, y, w, h]` of the live preview window in output px — `render` paints the clean PiP over exactly that region. Omit if no preview was shown.
+- `output.workarea` is `[x, y, w, h]` (output-relative) of the output minus bars/panels — a visible workspace's rect in Sway. `demovid/layout.py` measures the camera's position from it, so the PiP floats above waybar instead of on it. Absent on imports and pre-2026-09-06 recordings (then the screen edge is used).
+- `streams.cam.preview_rect` is `[x, y, w, h]` of the live preview window in output px. Since 2026-09-06 it is a SQUARE (side a multiple of 16, 0.80 of the PiP side, centred where the PiP goes — `layout.preview_rect`), and `render` hides it under a squircle PiP of `layout.pip_for_preview(preview_rect)` whenever that region is in view; when the zoom moves it out of view the PiP jumps to the same spot in the output corner (`--pip-mode auto`). Omit if no preview was shown.
 - `cursor.shapes_dir` names the subdir of cursor PNGs (`null` when none were written). `cursor.hidden_during_rec` is true ONLY when the blank-theme swap (`rec --hide-cursor`) was used: a software cursor is painted into the output by the compositor, so `wf-recorder --no-cursor` suppresses only wf-recorder's own duplicate overlay, never the cursor itself. With `hidden_during_rec: false` the renderer must cover the recorded cursor, which it does by drawing the same shape enlarged about the same hotspot.
 - Cursor positions are emitted per output commit, so they are dense (~48/s measured) while the pointer moves and absent while it is still — gaps in the `cursor` stream mean "did not move", not "not recorded".
 - `cursor_source` is one of `ext-image-copy-capture`, `layer-shell-anchor`, `evdev-dead-reckoning`, `screenix`, `none`. `render` uses it to decide how much to trust `cursor` events (e.g. dead-reckoning may need drift correction).
@@ -64,6 +65,7 @@ Every line has `t` (float seconds) and `kind`. Coordinates are **output pixels, 
 | `window` | `change, con_id, rect` | `change` ∈ `new, close` for any window; `move, floating, fullscreen` for the focused window only (Sway emits no resize events) |
 | `cursor_shape` | `id, w, h, hotspot, scale, name?, source?` | the cursor image changed; `id` names `<shapes_dir>/<id>.png` (straight-alpha BGRA), `hotspot` is `[x, y]` in that image's pixels, `scale` the output scale it was captured at. `source` is `theme` when the picture came from the xcursor theme (identified by hotspot — see demovid/rec/xcursor.py) with `name` the cursor's name in it. The shape in force at time t is the last event at or before t |
 | `cursor_visible` | `visible` | the cursor entered (`true`) or left (`false`) the captured output |
+| `pause` / `resume` | — | `rec` was paused (the bar button) and resumed. Nothing else stops: every stream keeps running so the clocks stay trivially aligned, and the raw files still contain the span. `render` cuts `[pause, resume)` out (a `TimeMap` segment with speed = ∞, so video, audio and captions all skip it together; `--keep-pauses` disables) and ignores every event inside it when planning zooms. While paused `rec` writes NO `key` or `button` events (that is what pausing is for: passwords). An unterminated `pause` is closed by `rec` at stop |
 | `mark` | `label` | manual marker (`clap`, `chapter`, …) — used for sync checks and trims |
 | `stream` | `stream, event` | `event` ∈ `first_frame, stopped` — the raw evidence behind `offset_s`, appended when the recording stops (so out of `t` order); render ignores these |
 
@@ -74,7 +76,7 @@ Rules:
 
 ## Webcam PiP vs the live preview window
 
-`render --pip-mode fixed` (default) paints the PiP in a fixed output corner, Screen-Studio style. That only covers the recorded preview window while zoom = 1; zoomed in, the preview window in `screen.mp4` shows wherever the crop lands. `--pip-mode scene` instead paints the camera *into the source frame* at `preview_rect` before the zoom warp — it covers the preview window exactly at every zoom, but the PiP then zooms with the content. `rec` should keep the preview window where it will least often be zoomed into (a bottom corner), and either mode is a valid render choice.
+The preview window is in every frame of `screen.mp4`, so a camera drawn anywhere else shows two cameras. `render --pip-mode auto` (default) therefore paints the camera *into the source frame* over `pip_for_preview(preview_rect)` — a squircle slightly larger than the recorded square window — whenever that region intersects the current crop (always at zoom 1), and only when the zoom has moved it out of view does it draw the camera in the fixed output corner instead (same place, so the hand-over is a small pop, never a double). `--pip-mode scene` always paints into the source (the camera zooms with the content and can leave the frame); `--pip-mode fixed` always uses the corner (imports, or when there was no preview).
 
 ## Screenix import
 

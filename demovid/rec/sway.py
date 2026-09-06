@@ -46,20 +46,44 @@ class Output:
     height: int
     scale: float
     refresh_hz: float
+    workarea: list[int] | None = None  # [x, y, w, h] output-relative, minus bars/panels
 
     @classmethod
-    def from_ipc(cls, o) -> "Output":
+    def from_ipc(cls, o, conn: i3ipc.Connection | None = None) -> "Output":
         r = o.rect
         mode = o.ipc_data.get("current_mode") or {}
-        return cls(o.name, r.x, r.y, r.width, r.height, float(o.ipc_data.get("scale", 1.0)),
-                   round((mode.get("refresh") or 0) / 1000, 3))
+        out = cls(o.name, r.x, r.y, r.width, r.height, float(o.ipc_data.get("scale", 1.0)),
+                  round((mode.get("refresh") or 0) / 1000, 3))
+        if conn is not None:
+            # a visible workspace's rect is the output minus layer-shell exclusive zones (waybar)
+            for ws in conn.get_workspaces():
+                if ws.output == o.name and ws.visible:
+                    out.workarea = out.relative(ws.rect)
+                    break
+        return out
 
     def relative(self, rect) -> list[int]:
         return [rect.x - self.x, rect.y - self.y, rect.width, rect.height]
 
+    @property
+    def bottom_reserved(self) -> int:
+        """Pixels taken by a bar along the bottom edge (0 when unknown or none)."""
+        if not self.workarea:
+            return 0
+        return max(0, self.height - (self.workarea[1] + self.workarea[3]))
+
+    @property
+    def right_reserved(self) -> int:
+        if not self.workarea:
+            return 0
+        return max(0, self.width - (self.workarea[0] + self.workarea[2]))
+
     def as_dict(self) -> dict:
-        return {"name": self.name, "x": self.x, "y": self.y, "width": self.width, "height": self.height,
-                "scale": self.scale, "refresh_hz": self.refresh_hz}
+        d = {"name": self.name, "x": self.x, "y": self.y, "width": self.width, "height": self.height,
+             "scale": self.scale, "refresh_hz": self.refresh_hz}
+        if self.workarea:
+            d["workarea"] = self.workarea
+        return d
 
 
 def pick_output(conn: i3ipc.Connection, name: str | None) -> Output:
@@ -68,11 +92,11 @@ def pick_output(conn: i3ipc.Connection, name: str | None) -> Output:
         match = [o for o in outputs if o.name == name]
         if not match:
             raise RuntimeError(f"output {name!r} not found; have {[o.name for o in outputs]}")
-        return Output.from_ipc(match[0])
+        return Output.from_ipc(match[0], conn)
     focused = [o for o in outputs if o.focused] or outputs
     if not focused:
         raise RuntimeError("no active outputs")
-    return Output.from_ipc(focused[0])
+    return Output.from_ipc(focused[0], conn)
 
 
 def wake_output(conn: i3ipc.Connection, name: str) -> bool:

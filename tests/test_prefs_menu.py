@@ -84,24 +84,54 @@ def test_menu_entries_are_ascii_safe_and_have_actions(monkeypatch):
         assert all(ord(c) < 128 or 0xE000 <= ord(c) <= 0xF8FF for c in label)
 
 
-def test_menu_shows_stop_and_marks_toggles_as_deferred_while_recording(monkeypatch):
+def test_menu_while_recording_offers_pause_then_stop(monkeypatch):
     monkeypatch.setattr(menu, "latest", lambda: None)
-    monkeypatch.setattr("demovid.rec.status", lambda: {"recording": True, "dir": "/x", "pid": 1, "elapsed_s": 65.4})
+    monkeypatch.setattr("demovid.rec.status",
+                        lambda: {"recording": True, "paused": False, "dir": "/x", "pid": 1, "elapsed_s": 65.4})
     items = menu.entries()
-    assert "Stop recording" in items[0][0] and "1:05" in items[0][0]
-    assert all("(next recording)" in label for label, action in items[1:] if action.startswith("toggle:"))
+    assert "Pause recording" in items[0][0] and "1:05" in items[0][0] and items[0][1] == "toggle-pause"
+    assert "Stop recording" in items[1][0] and items[1][1] == "toggle-rec"
+    assert all("(next recording)" in label for label, action in items if action.startswith("toggle:"))
+
+
+def test_menu_while_paused_offers_resume_then_stop(monkeypatch):
+    monkeypatch.setattr(menu, "latest", lambda: None)
+    monkeypatch.setattr("demovid.rec.status",
+                        lambda: {"recording": True, "paused": True, "dir": "/x", "pid": 1, "elapsed_s": 5.0})
+    items = menu.entries()
+    assert "Resume recording" in items[0][0] and items[0][1] == "toggle-pause"
+    assert items[1][1] == "toggle-rec"
+
+
+def test_click_pauses_a_live_recording_without_a_menu(monkeypatch):
+    calls = []
+    monkeypatch.setattr("demovid.rec.status",
+                        lambda: {"recording": True, "paused": False, "dir": "/x", "pid": 1, "elapsed_s": 3.0})
+    monkeypatch.setattr(menu, "run", lambda action: calls.append(action) or 0)
+    monkeypatch.setattr(menu, "entries", lambda: (_ for _ in ()).throw(AssertionError("menu must not be built")))
+    assert menu.main(argparse.Namespace(print=False, pick=None, lines=11, click=True)) == 0
+    assert calls == ["toggle-pause"]
+
+
+def test_click_while_paused_or_idle_opens_the_menu(monkeypatch):
+    monkeypatch.setattr(menu, "latest", lambda: None)
+    for st in ({"recording": True, "paused": True, "dir": "/x", "pid": 1, "elapsed_s": 3.0},
+               {"recording": False, "paused": False, "stale": False}):
+        monkeypatch.setattr("demovid.rec.status", lambda st=st: st)
+        # --print short-circuits before fuzzel; reaching it proves the menu path was taken
+        assert menu.main(argparse.Namespace(print=True, pick=None, lines=11, click=True)) == 0
 
 
 def test_menu_pick_toggles_the_pref(monkeypatch):
     monkeypatch.setattr(menu, "latest", lambda: None)
     monkeypatch.setattr(menu, "notify", lambda body: None)
     monkeypatch.setattr("demovid.rec.state.poke_waybar", lambda: None)
-    ns = argparse.Namespace(print=False, pick="toggle:mic", lines=11)
+    ns = argparse.Namespace(print=False, pick="toggle:mic", lines=11, click=False)
     assert menu.main(ns) == 0
     assert prefs.load()["mic"] is False
 
 
 def test_menu_pick_rejects_an_unknown_entry(monkeypatch, capsys):
     monkeypatch.setattr(menu, "latest", lambda: None)
-    ns = argparse.Namespace(print=False, pick="toggle:nothing", lines=11)
+    ns = argparse.Namespace(print=False, pick="toggle:nothing", lines=11, click=False)
     assert menu.main(ns) == 1

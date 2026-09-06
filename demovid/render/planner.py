@@ -28,6 +28,7 @@ class PlanConfig:
     typing_window_s: float = 1.0
     focus_zoom: bool = True      # zoom to fit the focused window on focus change
     focus_min_fit: float = 1.15  # ignore focus rects that would zoom less than this
+    typing_anchor_s: float = 20.0  # typing zooms to the last click this recent (the field you clicked into)
     ignore_buttons: frozenset = field(default_factory=lambda: frozenset({"side", "extra"}))
 
 
@@ -111,6 +112,7 @@ def attention_targets(events: list[dict], cfg: PlanConfig) -> list[Target]:
     out: list[Target] = []
     cursor = (cfg.width / 2, cfg.height / 2)
     focus_rect: list | None = None
+    last_click: tuple[float, float, float] | None = None   # (t, x, y)
     recent_keys: list[float] = []
     typing_until = -1.0
     for e in sorted(events, key=lambda e: e.get("t", 0.0)):
@@ -124,17 +126,19 @@ def attention_targets(events: list[dict], cfg: PlanConfig) -> list[Target]:
             x, y = e.get("x"), e.get("y")
             if x is None or y is None:
                 x, y = cursor
+            last_click = (t, float(x), float(y))
             out.append(Target(t, float(x), float(y), cfg.zoom))
         elif kind == "key":
             if e.get("state") != "down" or str(e.get("key", "")).lower() in MODIFIER_KEYS or e.get("mods"):
                 continue
             recent_keys = [k for k in recent_keys if t - k <= cfg.typing_window_s] + [t]
+            anchor = (last_click[1], last_click[2]) if last_click and t - last_click[0] <= cfg.typing_anchor_s else None
             if t <= typing_until:
                 typing_until = t + cfg.hold_s
-                out.append(typing_target(t, cursor, focus_rect, cfg))
+                out.append(typing_target(t, cursor, focus_rect, cfg, anchor))
             elif len(recent_keys) >= cfg.typing_burst_keys:
                 typing_until = t + cfg.hold_s
-                out.append(typing_target(recent_keys[0], cursor, focus_rect, cfg))
+                out.append(typing_target(recent_keys[0], cursor, focus_rect, cfg, anchor))
         elif kind == "focus":
             rect = e.get("rect")
             if rect and len(rect) == 4:
@@ -147,11 +151,17 @@ def attention_targets(events: list[dict], cfg: PlanConfig) -> list[Target]:
     return out
 
 
-def typing_target(t: float, cursor: tuple, focus_rect: list | None, cfg: PlanConfig) -> Target:
+def typing_target(t: float, cursor: tuple, focus_rect: list | None, cfg: PlanConfig,
+                  anchor: tuple[float, float] | None = None) -> Target:
+    """Where typing happens. No compositor tells us the caret, so: the spot you clicked to focus the
+    field beats the current pointer (which drifts away while you type); a small focused window beats
+    both; the pointer is the last resort."""
     if focus_rect is not None:
         fit = fit_target(t, focus_rect, cfg)
         if fit is not None:
             return fit
+    if anchor is not None:
+        return Target(t, anchor[0], anchor[1], cfg.zoom)
     return Target(t, cursor[0], cursor[1], cfg.zoom)
 
 

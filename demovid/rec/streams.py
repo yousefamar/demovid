@@ -225,7 +225,8 @@ def cam_stream(
     """Encodes the webcam to cam.mp4; with a preview size, also emits scaled I420 frames on stdout."""
     graph = "[0:v]format=yuv420p,split[rec][pv]" if preview_size else "[0:v]format=yuv420p[rec]"
     if preview_size:
-        graph += f";[pv]scale={preview_size[0]}:{preview_size[1]}[pvo]"
+        # centre square crop first: the preview window is square so the rendered squircle can hide it
+        graph += f";[pv]crop=ih:ih,scale={preview_size[0]}:{preview_size[1]}[pvo]"
     cmd = [
         "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info",
         "-f", "v4l2", "-input_format", "mjpeg", "-video_size", f"{width}x{height}", "-framerate", str(fps),

@@ -23,7 +23,7 @@ class Segment:
 
     @property
     def out_len(self) -> float:
-        return (self.t1 - self.t0) / self.speed
+        return 0.0 if self.speed == float("inf") else (self.t1 - self.t0) / self.speed
 
 
 def activity_times(events: list[dict], min_move_px: float = 2.0) -> list[float]:
@@ -75,6 +75,48 @@ def intersect(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> lis
             i += 1
         else:
             j += 1
+    return out
+
+
+CUT = float("inf")  # a Segment speed meaning "drop this span entirely"
+
+
+def paused_intervals(events: list[dict], t_from: float, t_to: float) -> list[tuple[float, float]]:
+    """[pause, resume] spans from the event log, clipped to the render range. An unterminated pause
+    runs to t_to (rec closes it at stop, so that only happens on a crashed recording)."""
+    out: list[tuple[float, float]] = []
+    start: float | None = None
+    for e in sorted(events, key=lambda e: e.get("t", 0.0)):
+        if e.get("kind") == "pause" and start is None:
+            start = float(e["t"])
+        elif e.get("kind") == "resume" and start is not None:
+            out.append((start, float(e["t"])))
+            start = None
+    if start is not None:
+        out.append((start, t_to))
+    clipped = [(max(a, t_from), min(b, t_to)) for a, b in out]
+    return [(a, b) for a, b in clipped if b > a]
+
+
+def cuts(intervals: list[tuple[float, float]]) -> list[Segment]:
+    return [Segment(a, b, CUT) for a, b in intervals]
+
+
+def subtract(intervals: list[tuple[float, float]], holes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """intervals minus holes, both sorted lists of (a, b)."""
+    out: list[tuple[float, float]] = []
+    for a, b in sorted(intervals):
+        cur = a
+        for ha, hb in sorted(holes):
+            if hb <= cur or ha >= b:
+                continue
+            if ha > cur:
+                out.append((cur, ha))
+            cur = max(cur, hb)
+            if cur >= b:
+                break
+        if cur < b:
+            out.append((cur, b))
     return out
 
 

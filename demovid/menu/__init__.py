@@ -13,7 +13,7 @@ from pathlib import Path
 KITTY = Path("~/.local/kitty.app/bin/kitty").expanduser()
 # Nerd Font (Font Awesome 4) glyphs as \u escapes on purpose: literal PUA characters get silently
 # stripped by some tooling, which then looks like a missing font glyph. Keep this file pure ASCII.
-ICONS = {"start": "\uf04b", "stop": "\uf04d", "cam": "\uf03d", "preview": "\uf030", "mic": "\uf130",
+ICONS = {"start": "\uf04b", "stop": "\uf04d", "pause": "\uf04c", "resume": "\uf04b", "cam": "\uf03d", "preview": "\uf030", "mic": "\uf130",
          "keys": "\uf11c", "hide_cursor": "\uf245", "render": "\uf008", "upload": "\uf093",
          "open": "\uf07b", "doctor": "\uf0f1"}
 LABELS = {"cam": "Camera", "preview": "Preview window", "mic": "Microphone", "keys": "Keystrokes",
@@ -24,6 +24,8 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--print", action="store_true", help="print the menu instead of showing it (for testing)")
     p.add_argument("--pick", metavar="LABEL", help="run the action with this exact label, no menu")
     p.add_argument("--lines", type=int, default=11, help="menu height")
+    p.add_argument("--click", action="store_true",
+                   help="the bar button: pause a live recording, otherwise open the menu")
 
 
 def entries() -> list[tuple[str, str]]:
@@ -35,7 +37,11 @@ def entries() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if st["recording"]:
         m, s = divmod(int(st["elapsed_s"]), 60)
-        out.append((f"{ICONS['stop']}  Stop recording  {m}:{s:02d}", "toggle-rec"))
+        if st.get("paused"):
+            out.append((f"{ICONS['resume']}  Resume recording  {m}:{s:02d}", "toggle-pause"))
+        else:
+            out.append((f"{ICONS['pause']}  Pause recording  {m}:{s:02d}", "toggle-pause"))
+        out.append((f"{ICONS['stop']}  Stop recording", "toggle-rec"))
     else:
         out.append((f"{ICONS['start']}  Start recording", "toggle-rec"))
     suffix = "  (next recording)" if st["recording"] else ""
@@ -88,6 +94,8 @@ def run(action: str) -> int:
 
     if action == "toggle-rec":
         return subprocess.run([sys.executable, "-m", "demovid.cli", "rec"]).returncode
+    if action == "toggle-pause":
+        return subprocess.run([sys.executable, "-m", "demovid.cli", "rec", "--pause"]).returncode
     if action.startswith("toggle:"):
         name = action.split(":", 1)[1]
         value = prefs.toggle(name)
@@ -117,6 +125,12 @@ def run(action: str) -> int:
 
 
 def main(ns: argparse.Namespace) -> int:
+    if ns.click:
+        from demovid.rec import status
+
+        st = status()
+        if st["recording"] and not st.get("paused"):
+            return run("toggle-pause")   # one click while live = pause, no UI in the way
     items = entries()
     if ns.print:
         for label, action in items:

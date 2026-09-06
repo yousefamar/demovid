@@ -36,6 +36,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     idle.add_argument("--idle-min", type=float, default=2.0, help="shortest quiet stretch to speed up (s)")
     idle.add_argument("--idle-max", type=float, default=1.5, help="a sped-up stretch never lasts longer than this (s)")
     idle.add_argument("--idle-ignore-speech", action="store_true", help="speed up even while the mic hears talking")
+    idle.add_argument("--keep-pauses", action="store_true", help="do not cut the spans where rec was paused")
     frame = parser.add_argument_group("background frame")
     frame.add_argument("--pad", type=float, default=0.0, help="inset the screen on a background, fraction of height (0 = off)")
     frame.add_argument("--bg", default="#141414", help="'#rrggbb', '#rrggbb,#rrggbb' gradient, or an image path")
@@ -46,7 +47,12 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     cur.add_argument("--cursor-scale", type=float, default=2.5, help="x the 24 px system cursor (default 2.5)")
     cur.add_argument("--cursor-style", choices=["dark", "light"], default="dark",
                      help="dark: black arrow with white edge (macOS/Screen Studio); light: white with black edge")
-    cur.add_argument("--cursor-smooth", type=float, default=0.05, help="gaussian sigma in seconds (default 0.05)")
+    cur.add_argument("--cursor-smooth", type=float, default=None,
+                     help="gaussian sigma in seconds (default: 0 when the recording has exact positions, else 0.05)")
+    cur.add_argument("--cursor-lag", type=float, default=None, metavar="S",
+                     help="constant delay between cursor samples and screen frames (default 0)")
+    cur.add_argument("--no-cursor-snap", action="store_true",
+                     help="don't snap the drawn cursor onto the real one frame by frame (exact recordings only)")
     cur.add_argument("--no-ripple", action="store_true")
     cur.add_argument("--synthetic-cursor", action="store_true",
                      help="always draw the stylised arrow, even when the recording captured real cursor shapes")
@@ -61,8 +67,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     cap.add_argument("--captions-lang", metavar="ISO", help="force the language (default: auto)")
     pip = parser.add_argument_group("webcam")
     pip.add_argument("--no-pip", action="store_true")
-    pip.add_argument("--pip-mode", choices=["fixed", "scene"], default="fixed",
-                     help="fixed: output corner; scene: painted over preview_rect in the recording, zooms with it")
+    pip.add_argument("--pip-mode", choices=["auto", "fixed", "scene"], default="auto",
+                     help="auto: cover the recorded preview window while it is in view, fixed corner otherwise; "
+                          "fixed: always the output corner; scene: always over the preview, zooms with the content")
+    pip.add_argument("--pip-shape", choices=["squircle", "rounded", "circle"], default="squircle")
     pip.add_argument("--pip-size", type=float, default=0.15, help="fraction of output width (default 0.15)")
     pip.add_argument("--pip-pos", choices=["br", "bl", "tr", "tl"], default="br")
     aud = parser.add_argument_group("audio")
@@ -106,11 +114,11 @@ def main(ns: argparse.Namespace) -> int:
     from demovid.render import presets
     from demovid.render.chips import chips_from_events
     from demovid.render.compositor import Compositor, Look
-    from demovid.render.cursor import CursorTrack, ShapeTrack
+    from demovid.render.cursor import CursorRefiner, CursorTrack, ShapeTrack
     from demovid.render.media import (AsyncEncoder, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration,
                                       silences)
     from demovid.render.planner import Keyframe, PlanConfig, plan
-    from demovid.render.timing import IdleConfig, TimeMap, compress, idle_intervals
+    from demovid.render.timing import IdleConfig, TimeMap, compress, cuts, idle_intervals, paused_intervals, subtract
 
     if ns.list_presets:
         print(presets.describe())
@@ -150,41 +158,69 @@ def main(ns: argparse.Namespace) -> int:
     if t_to <= t_from:
         raise SystemExit(f"empty range {t_from}..{t_to}")
 
+    # spans where rec was paused are cut from the output; nothing that happened inside them may drive
+    # the zoom, ripples or chips either (a click while paused must not leave the render zoomed in)
+    paused = [] if (ns.keep_pauses or ns.still) else paused_intervals(events, t_from, t_to)
+    live_events = [e for e in events if not any(a <= float(e.get("t", 0.0)) < b for a, b in paused)] if paused else events
+
     if ns.no_zoom:
         keyframes = [Keyframe(0.0, src_w / 2, src_h / 2, 1.0)]
     else:
         cfg = PlanConfig(width=src_w, height=src_h, zoom=ns.zoom, hold_s=ns.zoom_hold, focus_zoom=not ns.no_focus_zoom)
-        keyframes = plan(events, cfg)
+        keyframes = plan(live_events, cfg)
     if ns.plan_json:
         Path(ns.plan_json).write_text(json.dumps([k.as_dict() for k in keyframes], indent=1))
 
     audio = streams.get("mic") if not ns.no_audio else None
     mic_offset = float(audio.get("offset_s") or 0.0) if audio else 0.0
 
-    tm = TimeMap(t_from, t_to)
+    segments = cuts(paused)
+    if paused:
+        print(f"[pause] {len(paused)} paused span(s) cut, {sum(b - a for a, b in paused):.1f}s")
     if ns.idle_speed and ns.idle_speed > 1.0 and not ns.still:
         icfg = IdleConfig(min_idle_s=ns.idle_min, speed=ns.idle_speed, max_out_s=ns.idle_max)
         quiet = None if (ns.idle_ignore_speech or not audio) else silences(rec / audio["file"], mic_offset)
-        idle = idle_intervals(events, t_from, t_to, icfg, quiet)
-        tm = TimeMap(t_from, t_to, compress(idle, icfg))
-        print(f"[idle] {len(tm.segments)} stretches sped up, {tm.saved_s:.1f}s of {t_to - t_from:.1f}s removed"
+        idle = subtract(idle_intervals(events, t_from, t_to, icfg, quiet), paused)
+        segments += compress(idle, icfg)
+        print(f"[idle] {len(idle)} stretches sped up"
               + ("" if quiet is not None else " (speech not checked)"))
+    tm = TimeMap(t_from, t_to, segments)
+    if segments:
+        print(f"[time] {t_to - t_from:.1f}s of recording -> {tm.duration:.1f}s of video")
 
     look = Look(out_w=out_w, out_h=out_h, out_scale=out_scale, cursor=not ns.no_cursor, cursor_scale=ns.cursor_scale,
                 cursor_style=ns.cursor_style, cursor_real=not ns.synthetic_cursor, chips=not ns.no_chips,
                 ripple=not ns.no_ripple, pip=not ns.no_pip, pip_mode=ns.pip_mode, pip_size=ns.pip_size,
-                pip_pos=ns.pip_pos, zoom_level=ns.zoom,
+                pip_pos=ns.pip_pos, pip_shape=ns.pip_shape, zoom_level=ns.zoom,
                 interpolation=cv2.INTER_CUBIC if ns.cubic else cv2.INTER_LINEAR,
                 pad=max(ns.pad, 0.0), bg=ns.bg, radius=ns.radius, shadow=not ns.no_shadow)
-    clicks = [(float(e["t"]), float(e["x"]), float(e["y"])) for e in events
+    clicks = [(float(e["t"]), float(e["x"]), float(e["y"])) for e in live_events
               if e.get("kind") == "button" and e.get("state") == "down" and e.get("x") is not None]
     shapes_name = (manifest.get("cursor") or {}).get("shapes_dir")
     shapes = ShapeTrack(events, rec / shapes_name if shapes_name else None)
-    chips = [] if ns.no_chips else chips_from_events(events, ns.chip_hold, shortcuts_only=not ns.all_keys)
-    if look.pip_mode == "scene" and cam and not preview_rect:
-        print("[pip] no preview_rect in the manifest; falling back to fixed corner")
-        look.pip_mode = "fixed"
-    cam_h = int(round(look.pip_size * out_w)) if look.pip_mode == "fixed" else (int(round(preview_rect[3])) if preview_rect else 0)
+    exact_cursor = manifest.get("cursor_source") == "ext-image-copy-capture"
+    cursor_smooth = ns.cursor_smooth if ns.cursor_smooth is not None else (0.0 if exact_cursor else 0.05)
+    cursor_lag = ns.cursor_lag or 0.0
+    nominal_px = int((manifest.get("cursor") or {}).get("size") or 24)
+    refiner = (CursorRefiner(shapes, nominal_px) if exact_cursor and shapes.present and not ns.no_cursor
+               and not ns.no_cursor_snap else None)
+    chips = [] if ns.no_chips else chips_from_events(live_events, ns.chip_hold, shortcuts_only=not ns.all_keys)
+    # the PiP square in source px: over the recorded preview window when there is one (so it hides it),
+    # else a work-area corner from the same layout rules; imports without either use the old corner+margin
+    from demovid import layout
+    pip_box_src = None
+    if cam:
+        workarea = manifest["output"].get("workarea")
+        if preview_rect:
+            pip_box_src = layout.clamp_square(layout.pip_for_preview(preview_rect), src_w, src_h)
+        elif workarea and not crop:
+            pip_box_src = layout.pip_square(src_w, src_h, workarea, ns.pip_pos)
+        if look.pip_mode == "scene" and not preview_rect:
+            print("[pip] no preview_rect in the manifest; falling back to fixed corner")
+            look.pip_mode = "fixed"
+    # decode the cam big enough for the in-source cover at the planner's zoom, not just the corner size
+    pip_side_out = int(round((pip_box_src[2] * out_scale) if pip_box_src else look.pip_size * out_w))
+    cam_h = int(round(pip_side_out * (ns.zoom if look.pip_mode != "fixed" else 1.0)))
 
     def cam_reader(seek_t: float, duration: float | None):
         if cam is None:
@@ -206,8 +242,8 @@ def main(ns: argparse.Namespace) -> int:
                 print(f"[still] {t} outside {t_from:.2f}..{t_to:.2f}, skipped")
                 continue
             win = 0.5
-            track = CursorTrack(events, t - win, fps, int(2 * win * fps) + 1, ns.cursor_smooth)
-            comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect, shapes, chips)
+            track = CursorTrack(events, t - win, fps, int(2 * win * fps) + 1, cursor_smooth, cursor_lag)
+            comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect, shapes, chips, refiner, pip_box_src)
             reader = FrameReader(screen_path, fps, t - screen_offset, 1.5 / fps)
             feed = cam_reader(t, 1.5 / (cam.get("fps") or 30) if cam else None)
             frame = reader.read()
@@ -226,8 +262,8 @@ def main(ns: argparse.Namespace) -> int:
     out = Path(ns.out).expanduser() if ns.out else rec / ("preview.mp4" if ns.preview else "render.mp4")
     n_src_frames = int(round((t_to - t_from) * fps))
     n_frames = int(round(tm.duration * fps))
-    track = CursorTrack(events, t_from, fps, n_src_frames, ns.cursor_smooth)
-    comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect, shapes, chips)
+    track = CursorTrack(events, t_from, fps, n_src_frames, cursor_smooth, cursor_lag)
+    comp = Compositor(keyframes, src_w, src_h, look, track, clicks, preview_rect, shapes, chips, refiner, pip_box_src)
 
     audio_args = {}
     if audio:
@@ -243,7 +279,7 @@ def main(ns: argparse.Namespace) -> int:
         segments = transcribe(rec / audio["file"], rec / "captions.json", ns.captions_lang)
         srt_path = out.with_suffix(".srt")
         srt_path.write_text(to_srt(segments, mic_offset, tm))
-        side = look.pip_size + 2 * look.pip_margin if (cam and look.pip_mode == "fixed") else 0.06
+        side = (pip_side_out / out_w + 0.03) if cam else 0.06
         video_filter = subtitles_filter(srt_path, out_h, above_chips=bool(chips), side_margin_frac=side)
         print(f"[captions] {len(segments)} segments -> {srt_path}")
 
@@ -280,7 +316,8 @@ def main(ns: argparse.Namespace) -> int:
             feed.close()
         rc = enc.close()
     el = time.time() - started
-    print(f"[render] wrote {i + 1} frames in {el:.0f}s ({(i + 1) / max(el, 1e-6):.0f} fps) -> {out}")
+    print(f"[render] wrote {i + 1} frames in {el:.0f}s ({(i + 1) / max(el, 1e-6):.0f} fps) -> {out}"
+          + (f"; cursor {refiner.summary()}" if refiner else ""))
     if rc == 0:
         try:
             from demovid.island import refresh

@@ -14,9 +14,15 @@ SUPERSAMPLE = 4
 
 
 class CursorTrack:
-    """Cursor position per output frame, Gaussian-smoothed (zero lag: we know the future)."""
+    """Cursor position per output frame, optionally Gaussian-smoothed (zero phase: we know the future).
 
-    def __init__(self, events: list[dict], t_start: float, fps: float, n_frames: int, smooth_s: float = 0.05):
+    `lag_s` shifts the samples: the screen frame stamped t was committed slightly earlier (the copy
+    to wf-recorder takes a few ms), so the cursor drawn on it must be the position at t - lag_s.
+    See calibrate_lag().
+    """
+
+    def __init__(self, events: list[dict], t_start: float, fps: float, n_frames: int, smooth_s: float = 0.05,
+                 lag_s: float = 0.0):
         self.t_start, self.fps, self.n_frames = t_start, fps, n_frames
         pts = [(float(e["t"]), float(e["x"]), float(e["y"])) for e in events
                if e.get("kind") == "cursor" and e.get("x") is not None and e.get("y") is not None]
@@ -27,7 +33,7 @@ class CursorTrack:
             self.first_t = self.last_t = 0.0
             return
         ts = np.array([p[0] for p in pts])
-        frame_ts = t_start + np.arange(n_frames) / fps
+        frame_ts = t_start + np.arange(n_frames) / fps - lag_s
         xs = np.interp(frame_ts, ts, [p[1] for p in pts])
         ys = np.interp(frame_ts, ts, [p[2] for p in pts])
         sigma = smooth_s * fps
@@ -73,8 +79,7 @@ class ShapeTrack:
         self.marks.sort()
         self.present = bool(self.marks) and shapes_dir is not None and shapes_dir.is_dir()
 
-    def at(self, t: float):
-        """(bgr, alpha, hotspot_x, hotspot_y) in source pixels, or None to fall back to the arrow."""
+    def index_at(self, t: float) -> int | None:
         if not self.present:
             return None
         i = -1
@@ -83,14 +88,107 @@ class ShapeTrack:
                 i = j
             else:
                 break
-        if i < 0:
-            i = 0  # before the first capture: the first shape is the best guess
+        return max(i, 0)  # before the first capture: the first shape is the best guess
+
+    def at(self, t: float):
+        """(bgr, alpha, hotspot_x, hotspot_y) in source pixels, or None to fall back to the arrow."""
+        i = self.index_at(t)
+        if i is None:
+            return None
         _, sid, hotspot, scale = self.marks[i]
         img = load_shape(self.dir / f"{sid}.png")
         if img is None:
             return None
         bgr, alpha = img
         return bgr, alpha, hotspot[0] / scale, hotspot[1] / scale
+
+
+def cursor_samples(events: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pts = sorted((float(e["t"]), float(e["x"]), float(e["y"])) for e in events
+                 if e.get("kind") == "cursor" and e.get("x") is not None and e.get("y") is not None)
+    if not pts:
+        return np.zeros(0), np.zeros(0), np.zeros(0)
+    a = np.array(pts)
+    return a[:, 0], a[:, 1], a[:, 2]
+
+
+def locate_cursor(frame: np.ndarray, template_bgr: np.ndarray, template_alpha: np.ndarray, hotspot: tuple[float, float],
+                  guess: tuple[float, float], radius: int = 90) -> tuple[tuple[float, float], float] | None:
+    """Find the real cursor near `guess` by masked template matching. Returns (hotspot_xy, score)."""
+    th, tw = template_alpha.shape
+    fh, fw = frame.shape[:2]
+    gx, gy = guess
+    x0, y0 = int(max(0, gx - hotspot[0] - radius)), int(max(0, gy - hotspot[1] - radius))
+    x1, y1 = int(min(fw, gx - hotspot[0] + tw + radius)), int(min(fh, gy - hotspot[1] + th + radius))
+    if x1 - x0 < tw + 2 or y1 - y0 < th + 2:
+        return None
+    roi = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    tpl = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2GRAY)
+    mask = (template_alpha > 0.5).astype(np.uint8) * 255
+    if mask.sum() < 20 * 255:
+        return None
+    res = cv2.matchTemplate(roi, tpl, cv2.TM_CCORR_NORMED, mask=mask)
+    _, score, _, loc = cv2.minMaxLoc(res)
+    if not np.isfinite(score):
+        return None
+    return (x0 + loc[0] + hotspot[0], y0 + loc[1] + hotspot[1]), float(score)
+
+
+class CursorRefiner:
+    """Snap the drawn cursor onto the real one, frame by frame.
+
+    The samples and the frames disagree by up to one sample interval (~7 ms, measured), which at
+    1500 px/s is 10+ px — enough for the recorded 24 px cursor to peek out from under the enlarged
+    one. A masked template match of the current shape (at its nominal size) near the predicted
+    position finds the true hotspot; anything below `min_score` or farther than `radius` is ignored.
+    """
+
+    def __init__(self, shapes: "ShapeTrack", nominal_px: int, min_score: float = 0.85, radius: int = 40,
+                 min_move_px: float = 2.0):
+        self.shapes, self.nominal, self.min_score, self.radius, self.min_move = shapes, nominal_px, min_score, radius, min_move_px
+        self.hits = self.misses = self.skipped = 0
+        self._prev: tuple[float, float] | None = None
+        self._tpl_cache: dict = {}
+
+    def template(self, t: float):
+        i = self.shapes.index_at(t)
+        if i is None:
+            return None
+        key = (i, self.nominal)
+        if key not in self._tpl_cache:
+            shape = self.shapes.at(t)
+            if shape is None:
+                self._tpl_cache[key] = None
+            else:
+                bgr, alpha, hx, hy = shape
+                f = self.nominal / max(alpha.shape[0], 1)
+                tw, th = max(4, int(round(alpha.shape[1] * f))), max(4, int(round(alpha.shape[0] * f)))
+                self._tpl_cache[key] = (cv2.resize(bgr, (tw, th), interpolation=cv2.INTER_AREA),
+                                        cv2.resize(alpha, (tw, th), interpolation=cv2.INTER_AREA), (hx * f, hy * f))
+        return self._tpl_cache[key]
+
+    def refine(self, frame: np.ndarray, t: float, guess: tuple[float, float]) -> tuple[float, float]:
+        prev, self._prev = self._prev, guess
+        if prev is not None and math.hypot(guess[0] - prev[0], guess[1] - prev[1]) < self.min_move:
+            self.skipped += 1          # not moving: samples and frame agree, nothing to fix
+            return guess
+        tpl = self.template(t)
+        if tpl is None:
+            self.skipped += 1
+            return guess
+        found = locate_cursor(frame, tpl[0], tpl[1], tpl[2], guess, self.radius)
+        if found is None or found[1] < self.min_score:
+            self.misses += 1
+            return guess
+        (mx, my), _ = found
+        if math.hypot(mx - guess[0], my - guess[1]) > self.radius:
+            self.misses += 1
+            return guess
+        self.hits += 1
+        return mx, my
+
+    def summary(self) -> str:
+        return f"snapped {self.hits}, unmatched {self.misses}, still {self.skipped}"
 
 
 @lru_cache(maxsize=32)

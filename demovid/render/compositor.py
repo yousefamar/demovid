@@ -31,12 +31,14 @@ class Look:
     ripple_s: float = 0.45
     ripple_px: float = 34.0
     pip: bool = True
-    pip_mode: str = "fixed"       # fixed: output corner; scene: pasted into the source at preview_rect
-    pip_size: float = 0.15        # fraction of output width
+    pip_mode: str = "auto"        # auto: cover the recorded preview while it is in view, else fixed corner;
+                                  # fixed: always the output corner; scene: always over preview_rect in the source
+    pip_size: float = 0.15        # fraction of output width (layout.PIP_FRAC)
     pip_pos: str = "br"
-    pip_margin: float = 0.02      # fraction of output width
-    pip_radius: float = 0.22      # fraction of pip size
-    pip_shrink: float = 0.10      # shrink by this at full zoom
+    pip_margin: float = 0.02      # fraction of output width, imports only (recordings use layout.MARGIN_PX)
+    pip_shape: str = "squircle"   # squircle | rounded | circle
+    pip_radius: float = 0.22      # corner radius for `rounded`, fraction of pip size
+    pip_shrink: float = 0.10      # fixed PiP shrinks by this at full zoom
     zoom_level: float = 1.8       # planner's zoom, for the shrink ramp
     interpolation: int = cv2.INTER_LINEAR
     pad: float = 0.0              # background frame: padding as a fraction of output height (0 = none)
@@ -49,8 +51,12 @@ class Compositor:
     def __init__(self, keyframes: list[Keyframe], src_w: int, src_h: int, look: Look,
                  cursor: CursorTrack | None, clicks: list[tuple[float, float, float]],
                  preview_rect: list | None = None, shapes: ShapeTrack | None = None,
-                 chips: list[tuple[float, float, str]] | None = None):
+                 chips: list[tuple[float, float, str]] | None = None, refiner=None,
+                 pip_box_src: tuple[int, int, int] | None = None):
         self.kf = keyframes
+        self.refiner = refiner
+        # the PiP square in SOURCE px: over the recorded preview when there is one, else a work-area corner
+        self.pip_box_src = pip_box_src
         self.src_w, self.src_h = src_w, src_h
         self.look = look
         self.cursor = cursor
@@ -87,8 +93,14 @@ class Compositor:
         s = zoom * self.scale
         tx, ty = self.cx0 - cx * s, self.cy0 - cy * s
 
-        if cam is not None and L.pip and L.pip_mode == "scene" and self.preview_rect:
-            self.paste_pip(frame, cam, self.preview_rect, 0.0)
+        # camera, part 1: paint it INTO the source over the recorded preview window when that window
+        # is going to be in view (always at zoom 1), so the frames never show two cameras
+        cover = False
+        if cam is not None and L.pip and self.pip_box_src is not None and L.pip_mode in ("auto", "scene"):
+            bx, by, bs = self.pip_box_src
+            if L.pip_mode == "scene" or self.in_view((bx, by, bs, bs), cx, cy, zoom):
+                self.paste_pip(frame, cam, [bx, by, bs, bs])
+                cover = True
 
         if self.bg is not None:
             x0, y0, w, h = self.content
@@ -108,6 +120,8 @@ class Compositor:
 
         if self.cursor is not None and self.cursor.present and L.cursor:
             px, py = self.cursor.at(frame_i)
+            if self.refiner is not None:
+                px, py = self.refiner.refine(frame, t, (px, py))
             ox, oy = px * s + tx, py * s + ty
             size = 24 * L.cursor_scale * self.scale * math.sqrt(zoom)
             if L.ripple:
@@ -122,13 +136,22 @@ class Compositor:
             else:
                 draw_cursor(out, ox, oy, size * squash, L.cursor_style)
 
-        if cam is not None and L.pip and L.pip_mode == "fixed":
+        # camera, part 2: fixed corner of the output while the recorded preview is out of view
+        if cam is not None and L.pip and not cover and L.pip_mode in ("auto", "fixed"):
             ramp = min(max((zoom - 1) / max(L.zoom_level - 1, 1e-6), 0.0), 1.0)
-            size = int(round(L.pip_size * L.out_w * (1 - L.pip_shrink * ramp)))
-            margin = int(round(L.pip_margin * L.out_w))
-            x = margin if "l" in L.pip_pos else L.out_w - margin - size
-            y = margin if "t" in L.pip_pos else L.out_h - margin - size
-            self.paste_pip(out, cam, [x, y, size, size], L.pip_radius)
+            shrink = 1 - L.pip_shrink * ramp
+            if self.pip_box_src is not None:
+                bx, by, bs = self.pip_box_src
+                # the same box the cover uses, mapped through the zoom-1 content transform, then shrunk about its centre
+                fx, fy, fs = self.cx0 + (bx - self.src_w / 2) * self.scale, self.cy0 + (by - self.src_h / 2) * self.scale, bs * self.scale
+                size = int(round(fs * shrink))
+                x, y = int(round(fx + (fs - size) / 2)), int(round(fy + (fs - size) / 2))
+            else:
+                size = int(round(L.pip_size * L.out_w * shrink))
+                margin = int(round(L.pip_margin * L.out_w))
+                x = margin if "l" in L.pip_pos else L.out_w - margin - size
+                y = margin if "t" in L.pip_pos else L.out_h - margin - size
+            self.paste_pip(out, cam, [x, y, size, size])
 
         if L.chips and self.chips:
             draw_chips(out, visible_chips(self.chips, t), max(12, int(round(L.chip_height * L.out_h))),
@@ -146,15 +169,19 @@ class Compositor:
             out.append(c)
         return out
 
-    def paste_pip(self, dst: np.ndarray, cam: np.ndarray, rect: list, radius_frac: float) -> None:
+    def in_view(self, box: tuple, cx: float, cy: float, zoom: float) -> bool:
+        half_w, half_h = self.src_w / (2 * zoom), self.src_h / (2 * zoom)
+        from demovid.layout import intersects
+        return intersects(box, (cx - half_w, cy - half_h, 2 * half_w, 2 * half_h))
+
+    def paste_pip(self, dst: np.ndarray, cam: np.ndarray, rect: list) -> None:
         x, y, w, h = (int(round(v)) for v in rect)
         if w <= 0 or h <= 0:
             return
         tile = aspect_crop(cam, w, h)
         tile = cv2.resize(tile, (w, h), interpolation=cv2.INTER_AREA if tile.shape[0] > h else cv2.INTER_LINEAR)
-        mask, shadow, pad = rounded_mask(w, h, radius_frac)
-        if radius_frac > 0:
-            blend(dst, np.zeros((*shadow.shape, 3), np.uint8), shadow, x - pad, y - pad + int(0.03 * h))
+        mask, shadow, pad = shape_mask(w, h, self.look.pip_shape, self.look.pip_radius)
+        blend(dst, np.zeros((*shadow.shape, 3), np.uint8), shadow, x - pad, y - pad + int(0.03 * h))
         blend(dst, tile, mask, x, y)
 
 
@@ -186,7 +213,7 @@ def drop_shadow(canvas: np.ndarray, rect: tuple, radius: int) -> None:
     H, W = canvas.shape[:2]
     blur = max(6.0, 0.035 * H)
     mask = np.zeros((H, W), np.float32)
-    inner, _, _ = rounded_mask(w, h, radius / max(min(w, h), 1))
+    inner, _, _ = shape_mask(w, h, "rounded", radius / max(min(w, h), 1))
     dy = int(round(0.012 * H))
     ys, xs = slice(y0 + dy, y0 + dy + h), slice(x0, x0 + w)
     mask[ys, xs] = inner[:max(0, min(h, H - (y0 + dy))), :]
@@ -198,7 +225,7 @@ def corner_masks(w: int, h: int, r: int) -> list[tuple[int, int, np.ndarray]]:
     """(x, y, mask) for the four r×r corner squares of a w×h rounded rect; mask=1 inside the content."""
     if r <= 0:
         return []
-    mask, _, _ = rounded_mask(w, h, r / max(min(w, h), 1))
+    mask, _, _ = shape_mask(w, h, "rounded", r / max(min(w, h), 1))
     return [(0, 0, mask[:r, :r]), (w - r, 0, mask[:r, w - r:]), (0, h - r, mask[h - r:, :r]), (w - r, h - r, mask[h - r:, w - r:])]
 
 
@@ -215,15 +242,22 @@ def aspect_crop(img: np.ndarray, w: int, h: int) -> np.ndarray:
 
 
 @lru_cache(maxsize=32)
-def rounded_mask(w: int, h: int, radius_frac: float) -> tuple[np.ndarray, np.ndarray, int]:
-    """(mask HxW float32, shadow alpha (H+2p)x(W+2p) float32, pad)."""
-    r = int(round(min(w, h) * radius_frac * SUPERSAMPLE))
+def shape_mask(w: int, h: int, shape: str, radius_frac: float) -> tuple[np.ndarray, np.ndarray, int]:
+    """(mask HxW float32, shadow alpha (H+2p)x(W+2p) float32, pad) for a squircle, rounded rect or ellipse."""
     W, H = w * SUPERSAMPLE, h * SUPERSAMPLE
-    big = np.zeros((H, W), np.float32)
-    cv2.rectangle(big, (r, 0), (W - 1 - r, H - 1), 1.0, -1)
-    cv2.rectangle(big, (0, r), (W - 1, H - 1 - r), 1.0, -1)
-    for cx, cy in ((r, r), (W - 1 - r, r), (r, H - 1 - r), (W - 1 - r, H - 1 - r)):
-        cv2.circle(big, (cx, cy), r, 1.0, -1, cv2.LINE_AA)
+    if shape in ("squircle", "circle"):
+        from demovid.layout import SQUIRCLE_N
+        n = SQUIRCLE_N if shape == "squircle" else 2.0
+        ys = (np.arange(H, dtype=np.float32) + 0.5) / H * 2 - 1
+        xs = (np.arange(W, dtype=np.float32) + 0.5) / W * 2 - 1
+        big = ((np.abs(xs[None, :]) ** n + np.abs(ys[:, None]) ** n) <= 1.0).astype(np.float32)
+    else:
+        r = int(round(min(w, h) * radius_frac * SUPERSAMPLE))
+        big = np.zeros((H, W), np.float32)
+        cv2.rectangle(big, (r, 0), (W - 1 - r, H - 1), 1.0, -1)
+        cv2.rectangle(big, (0, r), (W - 1, H - 1 - r), 1.0, -1)
+        for cx, cy in ((r, r), (W - 1 - r, r), (r, H - 1 - r), (W - 1 - r, H - 1 - r)):
+            cv2.circle(big, (cx, cy), r, 1.0, -1, cv2.LINE_AA)
     mask = cv2.resize(big, (w, h), interpolation=cv2.INTER_AREA)
     pad = max(4, int(0.12 * min(w, h)))
     shadow = np.zeros((h + 2 * pad, w + 2 * pad), np.float32)

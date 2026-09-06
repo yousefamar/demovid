@@ -20,6 +20,7 @@ def _size(text: str) -> tuple[int, int]:
 
 def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--stop", action="store_true", help="stop only; exit 1 if nothing is recording")
+    p.add_argument("--pause", action="store_true", help="pause/resume the live recording; exit 1 if idle")
     p.add_argument("--status", action="store_true", help="print recording state as JSON")
     p.add_argument("--waybar", action="store_true", help="print a waybar custom-module JSON line")
     p.add_argument("--fg", action="store_true", help="record in the foreground (Ctrl-C stops)")
@@ -41,7 +42,8 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--preview", dest="preview", action="store_true", default=None,
                    help="show the webcam preview window")
     p.add_argument("--no-preview", dest="preview", action="store_false", help="don't show the webcam preview window")
-    p.add_argument("--preview-size", type=_size, default=(384, 216))
+    p.add_argument("--preview-size", type=_size, default=None,
+                   help="WxH of the preview window (default: the square demovid.layout prescribes)")
     p.add_argument("--hide-cursor", dest="hide_cursor", action="store_true", default=None,
                    help="swap in a blank cursor theme while recording (you won't see your cursor either)")
     p.add_argument("--show-cursor", dest="hide_cursor", action="store_false", help="keep the real cursor visible")
@@ -75,9 +77,18 @@ def _options(ns: argparse.Namespace):
 def status() -> dict:
     st = read_state()
     if st and pid_alive(st["pid"]):
+        now = time.time()
+        paused_since = st.get("paused_since")
+        paused = float(st.get("paused_total_s") or 0.0) + ((now - paused_since) if paused_since else 0.0)
         return {"recording": True, "dir": st["dir"], "pid": st["pid"],
-                "elapsed_s": round(time.time() - st["started_at"], 1)}
-    return {"recording": False, "stale": bool(st)}
+                "paused": paused_since is not None,
+                "elapsed_s": round(now - st["started_at"] - paused, 1)}
+    return {"recording": False, "paused": False, "stale": bool(st)}
+
+
+def toggle_pause(st: dict) -> int:
+    os.kill(st["pid"], signal.SIGUSR1)
+    return 0
 
 
 def stop_recording(st: dict) -> int:
@@ -100,6 +111,7 @@ def run_foreground(ns: argparse.Namespace) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: session.stop_event.set())
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGUSR1, lambda *_: session.toggle_pause())
     try:
         out = session.run()
     except Exception as e:
@@ -142,13 +154,19 @@ def main(ns: argparse.Namespace) -> int:
         s = status()
         if s["recording"]:
             m, sec = divmod(int(s["elapsed_s"]), 60)
-            out = {"text": f"● {m}:{sec:02d}", "class": "recording", "tooltip": s["dir"]}
+            icon, cls = ("\u23f8", "paused") if s["paused"] else ("\u25cf", "recording")
+            out = {"text": f"{icon} {m}:{sec:02d}", "class": cls, "tooltip": s["dir"]}
         else:
             out = {"text": "", "class": "idle", "tooltip": "demovid: idle"}
         print(json.dumps(out))
         return 0
 
     st = read_state()
+    if ns.pause:
+        if st and pid_alive(st["pid"]):
+            return toggle_pause(st)
+        print("not recording", file=sys.stderr)
+        return 1
     if st and pid_alive(st["pid"]):
         return stop_recording(st)
     if st:

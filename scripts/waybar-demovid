@@ -1,6 +1,6 @@
 #!/bin/sh
 # waybar custom/demovid: recording button + indicator, straight from the state file.
-# Click opens `demovid menu` (start/stop lives in there). Plain sh + jq (~1 ms) instead of
+# Click: idle -> menu (start lives in there); recording -> pause; paused -> menu (resume/stop first). Plain sh + jq (~1 ms) instead of
 # spawning Python every second. Signal: SIGRTMIN+9 makes it update the moment rec starts or stops.
 #
 # Two hard-won notes:
@@ -11,6 +11,7 @@
 #    no glyph for this" (it does have one; `fc-list ':charset=f03d'` proves it).
 ICON_IDLE=$(printf '\357\200\275')    # U+F03D nf-fa-video_camera
 ICON_REC=$(printf '\342\227\217')     # U+25CF black circle
+ICON_PAUSE=$(printf '\342\217\270')   # U+23F8 double vertical bar
 
 state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/demovid/rec.json"
 prefs="${XDG_CONFIG_HOME:-$HOME/.config}/demovid/prefs.json"
@@ -35,7 +36,16 @@ pid=$(jq -r '.pid // empty' "$state" 2>/dev/null)
 
 started=$(jq -r '.started_at // empty' "$state")
 dir=$(jq -r '.dir // ""' "$state")
-elapsed=$(awk -v s="$started" 'BEGIN{printf "%d", systime() - s}')
+paused_since=$(jq -r '.paused_since // empty' "$state")
+paused_total=$(jq -r '.paused_total_s // 0' "$state")
+# elapsed excludes paused time, so the counter freezes while paused
+elapsed=$(awk -v s="$started" -v ps="$paused_since" -v pt="$paused_total" \
+  'BEGIN{now=systime(); p=pt; if (ps != "") p += now - ps; printf "%d", now - s - p}')
 [ "$elapsed" -ge 0 ] 2>/dev/null || elapsed=0
-printf '{"text":"%s %d:%02d","class":"recording","tooltip":"recording to %s\\nclick for menu"}\n' \
-  "$ICON_REC" "$((elapsed / 60))" "$((elapsed % 60))" "$dir"
+if [ -n "$paused_since" ]; then
+  printf '{"text":"%s %d:%02d","class":"paused","tooltip":"paused, %s\\nclick for resume / stop"}\n' \
+    "$ICON_PAUSE" "$((elapsed / 60))" "$((elapsed % 60))" "$dir"
+else
+  printf '{"text":"%s %d:%02d","class":"recording","tooltip":"recording to %s\\nclick to pause"}\n' \
+    "$ICON_REC" "$((elapsed / 60))" "$((elapsed % 60))" "$dir"
+fi
