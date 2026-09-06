@@ -1,6 +1,6 @@
 #!/bin/sh
 # waybar custom/demovid: recording button + indicator, straight from the state file.
-# Left-click toggles recording, right-click opens `demovid menu`. Plain sh + jq (~1 ms) instead of
+# Click opens `demovid menu` (start/stop lives in there). Plain sh + jq (~1 ms) instead of
 # spawning Python every second. Signal: SIGRTMIN+9 makes it update the moment rec starts or stops.
 #
 # Two hard-won notes:
@@ -21,10 +21,10 @@ idle() {
       | select((.key == "hide_cursor" and .value == true) or (.key != "hide_cursor" and .value == false))
       | .key] | join(", ")' "$prefs" 2>/dev/null)
   if [ -n "$off" ] && [ "$off" != "null" ]; then
-    printf '{"text":"%s","class":"idle","tooltip":"demovid: idle, off: %s\\nleft-click record, right-click menu"}\n' \
+    printf '{"text":"%s","class":"idle","tooltip":"demovid: idle, off: %s\\nclick for menu"}\n' \
       "$ICON_IDLE" "$off"
   else
-    printf '{"text":"%s","class":"idle","tooltip":"demovid: idle\\nleft-click record, right-click menu"}\n' "$ICON_IDLE"
+    printf '{"text":"%s","class":"idle","tooltip":"demovid: idle\\nclick for menu"}\n' "$ICON_IDLE"
   fi
   exit 0
 }
@@ -37,5 +37,5 @@ started=$(jq -r '.started_at // empty' "$state")
 dir=$(jq -r '.dir // ""' "$state")
 elapsed=$(awk -v s="$started" 'BEGIN{printf "%d", systime() - s}')
 [ "$elapsed" -ge 0 ] 2>/dev/null || elapsed=0
-printf '{"text":"%s %d:%02d","class":"recording","tooltip":"recording to %s\\nleft-click stop, right-click menu"}\n' \
+printf '{"text":"%s %d:%02d","class":"recording","tooltip":"recording to %s\\nclick for menu"}\n' \
   "$ICON_REC" "$((elapsed / 60))" "$((elapsed % 60))" "$dir"

@@ -1,4 +1,4 @@
-"""demovid menu: the waybar button's right-click menu (fuzzel --dmenu).
+"""demovid menu: what the waybar button opens (fuzzel --dmenu).
 
 Start/stop, toggle what the next recording captures, and the follow-up actions (render, upload,
 open, doctor). Toggles write demovid/prefs.py, so they stick until changed.

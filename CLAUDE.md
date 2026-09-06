@@ -42,8 +42,8 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
 - **Region output** (`render --crop X,Y,W,H` / `--window NAME`): crops the source, shifts every event and the `preview_rect` into that frame (pointer events outside are dropped) and plans zoom inside it. No capture-time region recording (see the Sway 1.12 note above).
 - **Console island**: `demovid/island.py` writes `~/.config/console/canvas/islands/demovid.{html,json}` (recent recordings + renders + upload links); `render` and `upload` refresh it on success, `python -m demovid.island` does it by hand. The hub live-reloads on write.
 - **The waybar button** (`scripts/waybar-demovid`, module `custom/demovid`, sits just left of the tray): a dim
-  camera glyph when idle, red `\u25cf m:ss` while recording; left-click toggles `rec`, right-click opens
-  `demovid menu`. Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
+  camera glyph when idle, red `\u25cf m:ss` while recording; a click opens `demovid menu`, which has
+  start/stop as its first entry (Yousef's call: one button, one gesture, no hidden right-click). Plain sh + jq (~1 ms) reading the state file, instead of spawning Python every second
   (~79 ms); `rec` sends `SIGRTMIN+9` on start/stop so it updates instantly. Config points at the script in the
   MAIN checkout so a deleted worktree cannot break the bar. **Two traps, both cost an hour:** (1) waybar's
   SIGUSR2 reload does NOT reliably restart a custom module — it silently stops running the `exec`, and
@@ -52,7 +52,7 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   session — some tooling strips it silently, and the symptom (nothing renders, everything else fine) looks
   exactly like a missing font glyph. Write `\uXXXX` in Python and `$(printf '\357\200\275')` in sh, and
   check coverage with `fc-list ':charset=f03d'`, not by rendering (PIL's `.notdef` box counts as a hit).
-- **`demovid menu`** (`demovid/menu/`): the right-click menu, `fuzzel --dmenu` (his launcher). Start/stop,
+- **`demovid menu`** (`demovid/menu/`): the button's menu, `fuzzel --dmenu` (his launcher). Start/stop,
   five capture toggles, then render/upload/open the newest recording and `doctor`. Long jobs open in kitty
   with `--hold` so he can watch them. `--print` dumps the menu for tests, `--pick <action|label>` runs one
   entry without UI. Menu labels must stay unique: `--pick` matches on them.
