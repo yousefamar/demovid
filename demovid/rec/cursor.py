@@ -14,6 +14,7 @@ from pywayland.protocol.ext_image_capture_source_v1 import ExtOutputImageCapture
 from pywayland.protocol.ext_image_copy_capture_v1 import ExtImageCopyCaptureManagerV1
 from pywayland.protocol.wayland import WlOutput, WlSeat, WlShm
 
+from . import xcursor
 from .clock import Clock
 from .events import EventLog
 
@@ -64,13 +65,16 @@ class CursorSession(threading.Thread):
     """
 
     def __init__(self, log: EventLog, clock: Clock, output_name: str, scale: float = 1.0,
-                 shapes_dir: Path | None = None):
+                 shapes_dir: Path | None = None, theme: str | None = None, theme_size: int = 24):
         super().__init__(name="cursor-session", daemon=True)
         self.log = log
         self.clock = clock
         self.output_name = output_name
         self.scale = scale
         self.shapes_dir = shapes_dir
+        self.theme = theme
+        self.theme_size = theme_size
+        self._theme_index: dict[tuple[int, int], str] = {}
         self.position: tuple[int, int] | None = None
         self.hotspot: tuple[int, int] = (0, 0)
         self.hw_cursor_seen = False
@@ -115,6 +119,11 @@ class CursorSession(threading.Thread):
 
     def start(self) -> None:
         self.display = Display()
+        if self.theme is not None and self.shapes_dir is not None:
+            try:
+                self._theme_index = xcursor.index_theme(self.theme, self.theme_size)
+            except OSError:
+                self._theme_index = {}
         self.display.connect()
         registry = self.display.get_registry()
         registry.dispatcher["global"] = self._on_global
@@ -163,8 +172,38 @@ class CursorSession(threading.Thread):
     def _on_hotspot(self, session, x, y):
         # effective at the next frame `ready`; until then the previous image + hotspot pair stands
         self._pending_hotspot = (x, y)
-        if self._capture is None:
-            self.hotspot = (x, y)
+        self.hotspot = (x, y)
+        self._resolve_theme_shape(x, y)
+
+    def _resolve_theme_shape(self, hx: int, hy: int) -> None:
+        """Name the shape from its hotspot and save the theme's art for it.
+
+        Only used when the compositor cannot hand us the picture (software cursor -> no cursor swapchain
+        -> `buffer_size 0x0`), which on this machine is always. See demovid/rec/xcursor.py."""
+        if self.theme is None or self.shapes_dir is None or self._buf_size != (0, 0):
+            return
+        key = (round(hx / self.scale), round(hy / self.scale))
+        name = self._theme_index.get(key)
+        if name is None:
+            return
+        art = xcursor.load_shape(self.theme, name, self.theme_size)
+        if art is None:
+            return
+        w, h, xhot, yhot, bgra = art
+        sid = shape_id(bgra)
+        if sid == self.shape:
+            return
+        self.shape = sid
+        path = self.shapes_dir / f"{sid}.png"
+        if not path.exists():
+            import cv2
+
+            self.shapes_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(path), unpremultiply(bgra))
+            self.shapes_written += 1
+        self.hotspot = (hx, hy)
+        self.log.emit("cursor_shape", self.clock.now(), id=sid, w=w, h=h, hotspot=[xhot, yhot],
+                      scale=1.0, name=name, source="theme")
 
     def _on_position(self, session, x, y):
         t = self.clock.now()

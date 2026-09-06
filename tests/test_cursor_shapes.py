@@ -7,7 +7,8 @@ import pytest
 from demovid.rec.cursor import shape_id, unpremultiply
 from demovid.render.chips import chips_from_events, chip_sprite, key_label, visible_chips
 from demovid.render.cursor import ShapeTrack, draw_shape, load_shape
-from tests.xcursor import best_image
+from demovid.rec import xcursor
+from demovid.rec.xcursor import best_image
 
 ADWAITA = Path("/usr/share/icons/Adwaita/cursors")
 
@@ -201,3 +202,57 @@ def test_window_at_translates_to_output_relative_coordinates():
     s.output = Output("DP-2", 1920, 0, 1920, 1080, 1.0, 60.0)  # second output, offset in the layout
     got = s._window_at((10, 50))  # output-relative → global 1930, 50
     assert got["con_id"] == 1 and got["rect"] == [0, 40, 400, 300]
+
+
+# --- theme lookup by hotspot (the only route to a cursor picture on a software-cursor machine) ---
+
+def test_index_theme_maps_hotspots_to_canonical_names():
+    idx = xcursor.index_theme("Adwaita", 24)
+    assert idx[(3, 1)] == "default"     # not `context-menu`, which shares the hotspot
+    assert idx[(7, 5)] == "pointer"
+    assert idx[(11, 12)] == "text"
+
+
+def test_index_theme_falls_back_when_the_theme_is_missing():
+    """An unknown theme still indexes, via the Adwaita/default fallback — better a plain arrow than none."""
+    assert xcursor.theme_dir("no-such-theme-here") is None
+    idx = xcursor.index_theme("no-such-theme-here", 24)
+    assert idx.get((3, 1)) == "default"
+
+
+def test_load_shape_returns_the_largest_art():
+    w, h, xhot, yhot, bgra = xcursor.load_shape("Adwaita", "default", 24)
+    assert (w, h) == (96, 96)           # themes ship up to 96 px: sharper than upscaling a 24 px grab
+    assert (xhot, yhot) == (12, 4)      # hotspot scales with the art
+    assert bgra.shape == (96, 96, 4)
+    assert xcursor.load_shape("Adwaita", "no-such-cursor", 24) is None
+
+
+def test_rank_prefers_common_shapes():
+    assert xcursor._rank("default") < xcursor._rank("context-menu")
+    assert xcursor._rank("text") < xcursor._rank("zz-unknown")
+
+
+def test_read_images_rejects_non_xcursor_files(tmp_path):
+    junk = tmp_path / "junk"
+    junk.write_bytes(b"not a cursor at all")
+    with pytest.raises(ValueError):
+        xcursor.read_images(junk)
+
+
+def test_hotspot_scaled_shape_lookup_round_trip(tmp_path):
+    """What rec does: hotspot from the protocol -> name -> art -> PNG the renderer can load."""
+    import cv2
+
+    idx = xcursor.index_theme("Adwaita", 24)
+    name = idx[(7, 5)]
+    w, h, xhot, yhot, bgra = xcursor.load_shape("Adwaita", name, 24)
+    sid = shape_id(bgra)
+    (tmp_path / "cursors").mkdir()
+    cv2.imwrite(str(tmp_path / "cursors" / f"{sid}.png"), unpremultiply(bgra))
+    track = ShapeTrack([{"t": 0.0, "kind": "cursor_shape", "id": sid, "w": w, "h": h,
+                         "hotspot": [xhot, yhot], "scale": 1.0, "name": name}], tmp_path / "cursors")
+    shape = track.at(1.0)
+    assert shape is not None
+    assert shape[0].shape[:2] == (h, w)
+    assert (shape[2], shape[3]) == (xhot, yhot)

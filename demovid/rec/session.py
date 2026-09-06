@@ -75,9 +75,10 @@ class Session:
         self.cursor_session: cursor.CursorSession | None = None
         self.cursor_source = "none"
         self.shapes_dir = self.dir / cursor.SHAPES_DIR
+        self.theme, self.theme_size = sway.current_xcursor_theme()
         try:
             cs = cursor.CursorSession(self.events, self.clock, self.output.name, self.output.scale,
-                                      shapes_dir=self.shapes_dir)
+                                      shapes_dir=self.shapes_dir, theme=self.theme, theme_size=self.theme_size)
             cs.start()
             self.cursor_session = cs
         except Exception as e:
@@ -129,7 +130,6 @@ class Session:
         self.inputs.start()
         self.log(f"evdev: {', '.join(self.inputs.device_names())}")
 
-        self.theme, self.theme_size = sway.current_xcursor_theme()
         self.cursor_hidden = False
         if o.hide_cursor:
             sway.set_xcursor_theme(self.conn, blankcursor.ensure_theme(self.theme_size), self.theme_size)
@@ -278,8 +278,10 @@ class Session:
             "monotonic_ns": self.clock.monotonic_ns,
             "output": self.output.as_dict(),
             "streams": streams,
+            # NB: on a software cursor (always, here) the compositor paints the cursor INTO the output, so
+            # the frames contain it whatever wf-recorder does — only the blank-theme swap truly hides it.
             "cursor": {"theme": self.theme, "size": self.theme_size,
-                       "hidden_during_rec": self.cursor_hidden or self.tracking,
+                       "hidden_during_rec": self.cursor_hidden,
                        "shapes_dir": cursor.SHAPES_DIR if self.shapes_dir.is_dir() else None},
             "cursor_source": self.cursor_source,
             "input_devices": self.inputs.device_names(),

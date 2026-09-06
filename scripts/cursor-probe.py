@@ -12,6 +12,7 @@ from pathlib import Path
 
 from demovid.rec.clock import Clock
 from demovid.rec.cursor import CursorSession, available
+from demovid.rec.sway import current_xcursor_theme
 from demovid.rec.events import EventLog
 
 
@@ -30,7 +31,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         clock = Clock.start()
         log = EventLog(Path(td) / "events.jsonl", clock)
-        sess = CursorSession(log, clock, out["name"], scale=out.get("scale", 1.0), shapes_dir=Path(td) / "cursors")
+        theme, theme_size = current_xcursor_theme()
+        print(f"theme {theme} {theme_size}")
+        sess = CursorSession(log, clock, out["name"], scale=out.get("scale", 1.0), shapes_dir=Path(td) / "cursors",
+                             theme=theme, theme_size=theme_size)
         sess.start()
         time.sleep(0.4)
         seen = []
