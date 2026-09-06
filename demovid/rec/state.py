@@ -51,3 +51,15 @@ def pid_alive(pid: int) -> bool:
             return fh.read().split(")")[-1].split()[0] != "Z"
     except OSError:
         return False
+
+
+WAYBAR_SIGNAL = 9  # waybar's custom/demovid listens on SIGRTMIN+9
+
+
+def poke_waybar() -> None:
+    """Nudge waybar to re-read the state file now instead of on its next tick."""
+    import subprocess
+    try:
+        subprocess.run(["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "waybar"], capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        pass

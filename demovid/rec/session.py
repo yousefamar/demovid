@@ -13,7 +13,7 @@ from . import audio, blankcursor, cursor, sway
 from .clock import Clock
 from .events import EventLog
 from .inputs import InputLogger
-from .state import clear_state, log_path, write_state
+from .state import clear_state, log_path, poke_waybar, write_state
 from .streams import (Preview, Stream, cam_stream, mic_stream, screen_stream, tool_versions, unsuspend_source,
                       wait_first_frames, wf_supports_no_cursor)
 
@@ -75,6 +75,8 @@ class Session:
         self.cursor_session: cursor.CursorSession | None = None
         self.cursor_source = "none"
         self.shapes_dir = self.dir / cursor.SHAPES_DIR
+        if sway.wake_output(self.conn, self.output.name):
+            self.log(f"{self.output.name} was powered off (swayidle); woken for capture")
         self.theme, self.theme_size = sway.current_xcursor_theme()
         try:
             cs = cursor.CursorSession(self.events, self.clock, self.output.name, self.output.scale,
@@ -156,6 +158,7 @@ class Session:
         if warn:
             self.log("WARNING: " + warn)
         self.notify("● REC", warn or f"{self.output.name} {o.fps}fps → {self.dir.name}")
+        poke_waybar()
 
         while not self.stop_event.wait(0.25):
             if not self.streams[0].alive():
@@ -326,6 +329,7 @@ class Session:
         if not aborted:
             self.write_manifest(stopped_at=t_stop)
         clear_state()
+        poke_waybar()
         try:
             shutil.copy(log_path(), self.dir / "rec.log")
         except OSError:

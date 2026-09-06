@@ -107,3 +107,37 @@ def test_compose_zooms_and_paints_cursor_ripple_and_pip():
     assert out.shape == (H, W, 3)
     plain = Compositor(kf, W, H, Look(W, H, 1.0, cursor=False, pip=False), None, []).compose(src.copy(), 0.0, 0, None)
     assert (plain == src).all()  # identity path keeps geometry
+
+
+def test_background_solid_and_gradient_and_bad_spec():
+    import numpy as np
+    import pytest
+    from demovid.render.compositor import background, parse_color
+    solid = background("#102030", 8, 4)
+    assert solid.shape == (4, 8, 3) and tuple(solid[0, 0]) == (0x30, 0x20, 0x10)   # BGR
+    grad = background("#000000,#ffffff", 16, 16)
+    assert grad[0, 0].max() == 0 and grad[-1, -1].min() == 255
+    assert grad[0, 15].mean() == pytest.approx(grad[15, 0].mean(), abs=1)          # diagonal
+    assert parse_color("#ff0000") == (0, 0, 255)
+    with pytest.raises(SystemExit):
+        background("#fff", 4, 4)
+    with pytest.raises(SystemExit):
+        background("/nonexistent/bg.png", 4, 4)
+
+
+def test_padded_compositor_insets_the_content_and_keeps_aspect():
+    import numpy as np
+    from demovid.render.compositor import Compositor, Look
+    from demovid.render.planner import Keyframe
+    look = Look(out_w=192, out_h=108, out_scale=0.1, pad=0.1, bg="#000000", cursor=False, pip=False, chips=False)
+    comp = Compositor([Keyframe(0.0, 960, 540, 1.0)], 1920, 1080, look, None, [])
+    x, y, w, h = comp.content
+    pad = round(0.1 * 108)
+    assert w / h == pytest.approx(1920 / 1080, abs=0.02)   # source aspect preserved
+    assert x >= pad and y >= pad and x + w <= 192 - pad and y + h <= 108 - pad
+    assert (x, y) == ((192 - w) // 2, (108 - h) // 2)      # centred
+    frame = np.full((1080, 1920, 3), 200, np.uint8)
+    out = comp.compose(frame, 0.0, 0, None)
+    assert out.shape == (108, 192, 3)
+    assert out[0, 0].max() < 60          # background (with shadow) at the corner
+    assert out[54, 96].min() > 150       # content in the middle

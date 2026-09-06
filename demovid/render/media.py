@@ -59,7 +59,7 @@ class FrameReader:
 class Encoder:
     def __init__(self, out: Path, width: int, height: int, fps: float, encoder: str, quality: int,
                  audio: Path | None = None, audio_filter: str = "", audio_offset_s: float = 0.0,
-                 audio_duration_s: float | None = None):
+                 audio_duration_s: float | None = None, video_filter: str = ""):
         cmd = ["ffmpeg", "-v", "error", "-nostats", "-hide_banner", "-y",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", f"{fps:g}", "-i", "pipe:0"]
         if audio is not None:
@@ -69,6 +69,8 @@ class Encoder:
             if audio_duration_s is not None:
                 cmd += ["-t", f"{audio_duration_s:.6f}"]
         cmd += ["-map", "0:v:0"]
+        if video_filter:
+            cmd += ["-vf", video_filter]
         if audio is not None:
             # apad + -shortest: the video always decides the length; a mic track that stopped early gets silence
             cmd += ["-map", "1:a:0", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
@@ -167,18 +169,49 @@ def probe_duration(path: Path) -> float:
     return float(r.stdout.strip())
 
 
-def audio_chain(mic: Path, stream_offset_s: float, t_from: float, t_to: float | None, denoise: bool) -> tuple[str, float, float | None]:
+def level_track(mic: Path, win_s: float = 0.1, rate: int = 48000) -> list[float]:
+    """RMS level in dBFS per `win_s` window over the whole mic track."""
+    # astats' reset counts frames, so cut the stream into fixed win_s frames first
+    r = subprocess.run(["ffmpeg", "-v", "info", "-nostats", "-hide_banner", "-i", str(mic),
+                        "-af", f"aformat=channel_layouts=mono:sample_rates={rate},asetnsamples=n={int(win_s * rate)},"
+                               "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+                        "-f", "null", "-"], capture_output=True, text=True)
+    levels = []
+    for m in re.finditer(r"RMS_level=(-?[0-9.]+|-inf)", r.stdout):
+        levels.append(-120.0 if m.group(1) == "-inf" else float(m.group(1)))
+    return levels
+
+
+def silences(mic: Path, stream_offset_s: float, min_s: float = 0.6) -> list[tuple[float, float]]:
+    """Stretches where nobody is talking, on the recording clock. Threshold adapts to the recording."""
+    from demovid.render.timing import quiet_intervals, speech_threshold
+
+    win_s = 0.1
+    levels = level_track(mic, win_s)
+    thresh = speech_threshold(levels)
+    if thresh is None:
+        return []
+    return [(a + stream_offset_s, b + stream_offset_s) for a, b in quiet_intervals(levels, win_s, thresh, min_s)]
+
+
+def audio_chain(mic: Path, stream_offset_s: float, t_from: float, t_to: float | None, denoise: bool,
+                keep: list[tuple[float, float]] | None = None) -> tuple[str, float, float | None]:
     """Two-pass loudnorm (+ optional afftdn). Returns (filter, input_seek_s, input_duration_s).
 
     The mic stream starts at stream_offset_s on the recording clock; the render starts at t_from.
     If the render starts before the mic does, the gap is padded with silence via adelay.
+    `keep` = source-time intervals to keep (idle speed-up drops the rest); filter time is t - t_from.
     """
+    from demovid.render.timing import aselect_expr
+
     seek = max(t_from - stream_offset_s, 0.0)
     delay_ms = max(stream_offset_s - t_from, 0.0) * 1000
     duration = (t_to - t_from) if t_to is not None else None
     pre = []
     if delay_ms > 0.5:
         pre.append(f"adelay={delay_ms:.0f}:all=1")
+    if keep is not None:
+        pre.append(f"aselect='{aselect_expr(keep, t_from)}',asetpts=N/SR/TB")
     if denoise:
         pre.append("afftdn=nr=10:nf=-40:tn=1")
     measure = ",".join(pre + [f"loudnorm={LOUDNORM_TARGET}:print_format=json"])

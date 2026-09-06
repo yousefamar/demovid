@@ -118,6 +118,11 @@ def _upload(ns: argparse.Namespace, oauth, youtube) -> int:
         "seconds": round(time.monotonic() - t0, 1),
     })
     print(url + ("  (copied)" if copied else ""))
+    try:
+        from demovid.island import refresh
+        refresh()
+    except Exception:  # the dashboard never fails an upload
+        pass
     if got_privacy != ns.privacy:
         print(
             f"WARNING: YouTube set privacy to '{got_privacy}', not '{ns.privacy}'. Uploads from an unaudited "

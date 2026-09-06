@@ -39,6 +39,10 @@ class Look:
     pip_shrink: float = 0.10      # shrink by this at full zoom
     zoom_level: float = 1.8       # planner's zoom, for the shrink ramp
     interpolation: int = cv2.INTER_LINEAR
+    pad: float = 0.0              # background frame: padding as a fraction of output height (0 = none)
+    bg: str = "#141414"           # '#rrggbb', '#rrggbb,#rrggbb' (diagonal gradient) or an image path
+    radius: float = 0.018         # rounded corners of the padded content, fraction of output height
+    shadow: bool = True
 
 
 class Compositor:
@@ -57,17 +61,46 @@ class Compositor:
         self.shapes = shapes
         self.chips = chips or []
         self._click_i = 0
+        # content area: the whole output, or a source-aspect box inset by `pad` on a background
+        L = look
+        if L.pad > 0:
+            pad_px = int(round(L.pad * L.out_h))
+            self.scale = min((L.out_w - 2 * pad_px) / src_w, (L.out_h - 2 * pad_px) / src_h)
+            w, h = int(round(src_w * self.scale)), int(round(src_h * self.scale))
+            self.content = ((L.out_w - w) // 2, (L.out_h - h) // 2, w, h)
+            r = int(round(L.radius * L.out_h))
+            self.bg = background(L.bg, L.out_w, L.out_h)
+            if L.shadow:
+                drop_shadow(self.bg, self.content, r)
+            self.corners = corner_masks(w, h, r)
+        else:
+            self.scale = L.out_scale
+            self.content = (0, 0, L.out_w, L.out_h)
+            self.bg = None
+            self.corners = []
+        x0, y0, w, h = self.content
+        self.cx0, self.cy0 = x0 + w / 2, y0 + h / 2
 
     def compose(self, frame: np.ndarray, t: float, frame_i: int, cam: np.ndarray | None) -> np.ndarray:
         L = self.look
         cx, cy, zoom = state_at(self.kf, t, self.src_w, self.src_h)
-        s = zoom * L.out_scale
-        tx, ty = L.out_w / 2 - cx * s, L.out_h / 2 - cy * s
+        s = zoom * self.scale
+        tx, ty = self.cx0 - cx * s, self.cy0 - cy * s
 
         if cam is not None and L.pip and L.pip_mode == "scene" and self.preview_rect:
             self.paste_pip(frame, cam, self.preview_rect, 0.0)
 
-        if abs(s - 1.0) < 1e-9 and abs(tx) < 1e-6 and abs(ty) < 1e-6:
+        if self.bg is not None:
+            x0, y0, w, h = self.content
+            M = np.array([[s, 0, tx - x0], [0, s, ty - y0]], dtype=np.float64)
+            content = cv2.warpAffine(frame, M, (w, h), flags=L.interpolation, borderMode=cv2.BORDER_CONSTANT)
+            out = self.bg.copy()
+            out[y0:y0 + h, x0:x0 + w] = content
+            for (mx, my, mask) in self.corners:
+                roi = out[y0 + my:y0 + my + mask.shape[0], x0 + mx:x0 + mx + mask.shape[1]]
+                bgroi = self.bg[y0 + my:y0 + my + mask.shape[0], x0 + mx:x0 + mx + mask.shape[1]]
+                roi[:] = (roi * mask[..., None] + bgroi * (1 - mask[..., None])).astype(np.uint8)
+        elif abs(s - 1.0) < 1e-9 and abs(tx) < 1e-6 and abs(ty) < 1e-6:
             out = frame
         else:
             M = np.array([[s, 0, tx], [0, s, ty]], dtype=np.float64)
@@ -76,10 +109,10 @@ class Compositor:
         if self.cursor is not None and self.cursor.present and L.cursor:
             px, py = self.cursor.at(frame_i)
             ox, oy = px * s + tx, py * s + ty
-            size = 24 * L.cursor_scale * L.out_scale * math.sqrt(zoom)
+            size = 24 * L.cursor_scale * self.scale * math.sqrt(zoom)
             if L.ripple:
                 for ct, kx, ky in self.active_clicks(t):
-                    draw_ripple(out, kx * s + tx, ky * s + ty, t - ct, L.ripple_s, L.ripple_px * L.out_scale * math.sqrt(zoom))
+                    draw_ripple(out, kx * s + tx, ky * s + ty, t - ct, L.ripple_s, L.ripple_px * self.scale * math.sqrt(zoom))
             pressed = any(0 <= t - ct < 0.12 for ct, _, _ in self.active_clicks(t))
             squash = 0.86 if pressed else 1.0
             shape = self.shapes.at(t) if (L.cursor_real and self.shapes is not None) else None
@@ -123,6 +156,50 @@ class Compositor:
         if radius_frac > 0:
             blend(dst, np.zeros((*shadow.shape, 3), np.uint8), shadow, x - pad, y - pad + int(0.03 * h))
         blend(dst, tile, mask, x, y)
+
+
+def background(spec: str, w: int, h: int) -> np.ndarray:
+    """Solid '#rrggbb', diagonal gradient '#rrggbb,#rrggbb', or an image file scaled to cover."""
+    spec = spec.strip()
+    if "," in spec:
+        c1, c2 = (parse_color(c) for c in spec.split(",", 1))
+        u = (np.arange(w, dtype=np.float32)[None, :] / max(w - 1, 1) + np.arange(h, dtype=np.float32)[:, None] / max(h - 1, 1)) / 2
+        return (np.array(c1, np.float32) * (1 - u[..., None]) + np.array(c2, np.float32) * u[..., None]).astype(np.uint8)
+    if spec.startswith("#"):
+        return np.full((h, w, 3), parse_color(spec), np.uint8)
+    img = cv2.imread(spec, cv2.IMREAD_COLOR)
+    if img is None:
+        raise SystemExit(f"--bg: cannot read {spec}")
+    return cv2.resize(aspect_crop(img, w, h), (w, h), interpolation=cv2.INTER_AREA)
+
+
+def parse_color(s: str) -> tuple[int, int, int]:
+    s = s.strip().lstrip("#")
+    if len(s) != 6:
+        raise SystemExit(f"--bg: expected #rrggbb, got #{s}")
+    r, g, b = (int(s[i:i + 2], 16) for i in (0, 2, 4))
+    return (b, g, r)  # OpenCV is BGR
+
+
+def drop_shadow(canvas: np.ndarray, rect: tuple, radius: int) -> None:
+    x0, y0, w, h = rect
+    H, W = canvas.shape[:2]
+    blur = max(6.0, 0.035 * H)
+    mask = np.zeros((H, W), np.float32)
+    inner, _, _ = rounded_mask(w, h, radius / max(min(w, h), 1))
+    dy = int(round(0.012 * H))
+    ys, xs = slice(y0 + dy, y0 + dy + h), slice(x0, x0 + w)
+    mask[ys, xs] = inner[:max(0, min(h, H - (y0 + dy))), :]
+    mask = cv2.GaussianBlur(mask, (0, 0), blur) * 0.6
+    canvas[:] = (canvas * (1 - mask[..., None])).astype(np.uint8)
+
+
+def corner_masks(w: int, h: int, r: int) -> list[tuple[int, int, np.ndarray]]:
+    """(x, y, mask) for the four r×r corner squares of a w×h rounded rect; mask=1 inside the content."""
+    if r <= 0:
+        return []
+    mask, _, _ = rounded_mask(w, h, r / max(min(w, h), 1))
+    return [(0, 0, mask[:r, :r]), (w - r, 0, mask[:r, w - r:]), (0, h - r, mask[h - r:, :r]), (w - r, h - r, mask[h - r:, w - r:])]
 
 
 def aspect_crop(img: np.ndarray, w: int, h: int) -> np.ndarray:

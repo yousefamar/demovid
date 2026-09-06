@@ -94,12 +94,110 @@ def _cursor_tracking(timeout_s: float = 1.0) -> tuple[bool, str]:
                    "re-login, or stop the screencopy client that is overlaying the cursor")
 
 
+WLROOTS_LIB = Path("/usr/local/lib/x86_64-linux-gnu/libwlroots-0.19.so")
+WLROOTS_PATCHED_BUILD = Path("~/src/wlroots-0.19.3/build2/libwlroots-0.19.so").expanduser()
+WLROOTS_UNPATCHED_GLOB = ("~/src", "libwlroots-0.19.so.unpatched-*")
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _wlroots_patch() -> tuple[str, str]:
+    """Is the installed wlroots the software-cursor-capture build? Compared by checksum against the
+    known patched build and the saved unpatched copy (see CLAUDE.md)."""
+    if not WLROOTS_LIB.exists():
+        return FAIL, f"{WLROOTS_LIB} missing"
+    installed = _sha256(WLROOTS_LIB)
+    if WLROOTS_PATCHED_BUILD.exists() and _sha256(WLROOTS_PATCHED_BUILD) == installed:
+        return OK, "installed lib is the patched build2 (software cursor reported to capture clients)"
+    for backup in Path(WLROOTS_UNPATCHED_GLOB[0]).expanduser().glob(WLROOTS_UNPATCHED_GLOB[1]):
+        if _sha256(backup) == installed:
+            return FAIL, f"installed lib matches the UNPATCHED backup {backup.name}: cursor tracking is dead — reinstall build2"
+    return WARN, "installed lib matches neither the patched build nor the unpatched backup (rebuilt? re-apply the patch)"
+
+
+def _sway_environ(pid: int) -> dict[str, str]:
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return {}
+    return dict(kv.decode(errors="replace").split("=", 1) for kv in raw if b"=" in kv)
+
+
+def _sync_fds(pid: int) -> int:
+    n = 0
+    try:
+        for fd in Path(f"/proc/{pid}/fd").iterdir():
+            try:
+                if "sync_file" in os.readlink(fd):
+                    n += 1
+            except OSError:
+                pass
+    except OSError:
+        return -1
+    return n
+
+
+def _screencopy_probe() -> tuple[str, str]:
+    """grim on a tiny region: the one-line functional test that screencopy works at all."""
+    import tempfile
+
+    from ..rec import sway
+
+    if not shutil.which("grim"):
+        return WARN, "grim not installed; cannot probe screencopy"
+    with tempfile.TemporaryDirectory() as td:
+        out = subprocess.run(["grim", "-g", "0,0 16x16", f"{td}/probe.png"], capture_output=True, text=True, timeout=10)
+        ok = out.returncode == 0 and Path(f"{td}/probe.png").exists()
+    if ok:
+        return OK, "grim copied a 16x16 region"
+    err = (out.stderr or out.stdout).strip()[-160:]
+    try:
+        asleep = [o.name for o in sway.connect().get_outputs() if o.active and getattr(o, "power", True) is False]
+    except Exception:
+        asleep = []
+    if asleep:
+        return WARN, (f"output {', '.join(asleep)} is powered off (swayidle), so there is nothing to copy — "
+                      "wake the display and re-run; `rec` wakes it itself")
+    return FAIL, f"grim failed: {err}"
+
+
 def checks(out_root: Path) -> list[tuple[str, str, str]]:
     from ..rec import cursor, sway
     from ..rec.inputs import input_devices
     from ..rec.streams import wf_supports_no_cursor
 
     res: list[tuple[str, str, str]] = []
+    sway_pid = None
+    try:
+        sway_pid = int(subprocess.run(["pgrep", "-x", "sway"], capture_output=True, text=True).stdout.split()[0])
+    except (IndexError, ValueError, OSError):
+        pass
+
+    if sway_pid:
+        env = _sway_environ(sway_pid)
+        fds = _sync_fds(sway_pid)
+        has = env.get("WLR_RENDER_NO_EXPLICIT_SYNC") == "1"
+        res.append((OK if has else WARN, "explicit sync",
+                    f"WLR_RENDER_NO_EXPLICIT_SYNC=1 in sway's environment; {fds} sync_file fds now (steady ~1750 is normal, "
+                    "a count that climbs between runs is the fence leak)" if has
+                    else f"WLR_RENDER_NO_EXPLICIT_SYNC not set for sway (pid {sway_pid}); {fds} sync_file fds — screencopy "
+                         "breaks on Vulkan + NVIDIA 580 without it (see CLAUDE.md)"))
+    level, detail = _screencopy_probe()
+    res.append((level, "screencopy", detail))
+    level, detail = _wlroots_patch()
+    res.append((level, "wlroots patch", detail))
+    wf = shutil.which("wf-recorder") or ""
+    res.append((OK if wf.startswith("/usr/local/") else WARN, "wf-recorder build",
+                f"{wf} (patched 0.5.0 shadows the distro build)" if wf.startswith("/usr/local/")
+                else f"{wf or 'missing'}: the distro build has no --no-cursor; ninja -C ~/src/wf-recorder-0.5.0/build install"))
 
     try:
         conn = sway.connect()

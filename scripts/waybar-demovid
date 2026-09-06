@@ -1,0 +1,17 @@
+#!/bin/sh
+# waybar custom/demovid: recording indicator straight from the state file.
+# Replaces `demovid rec --waybar` (~100 ms of Python per second). Signal: SIGRTMIN+9 for instant updates.
+state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/demovid/rec.json"
+
+idle() { printf '{"text":"","class":"idle","tooltip":"demovid: idle"}\n'; exit 0; }
+
+[ -r "$state" ] || idle
+pid=$(jq -r '.pid // empty' "$state" 2>/dev/null)
+[ -n "$pid" ] && [ -d "/proc/$pid" ] || idle
+
+started=$(jq -r '.started_at // empty' "$state")
+dir=$(jq -r '.dir // ""' "$state")
+elapsed=$(awk -v s="$started" 'BEGIN{printf "%d", systime() - s}')
+[ "$elapsed" -ge 0 ] 2>/dev/null || elapsed=0
+printf '{"text":"● %d:%02d","class":"recording","tooltip":"%s"}\n' \
+  "$((elapsed / 60))" "$((elapsed % 60))" "$dir"

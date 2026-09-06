@@ -2,6 +2,7 @@ import glob
 import os
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -72,6 +73,18 @@ def pick_output(conn: i3ipc.Connection, name: str | None) -> Output:
     if not focused:
         raise RuntimeError("no active outputs")
     return Output.from_ipc(focused[0])
+
+
+def wake_output(conn: i3ipc.Connection, name: str) -> bool:
+    """Power a DPMS-blanked output back on. screencopy has nothing to copy while it is off, so
+    capture fails outright (swayidle here blanks after 600 s)."""
+    match = [o for o in conn.get_outputs() if o.name == name]
+    if not match or getattr(match[0], "power", True) is not False:
+        return False
+    if not all(r.success for r in conn.command(f"output {name} power on")):
+        raise RuntimeError(f"could not power on {name}")
+    time.sleep(0.5)
+    return True
 
 
 def set_xcursor_theme(conn: i3ipc.Connection, theme: str, size: int) -> None:

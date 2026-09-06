@@ -12,6 +12,10 @@
   events.jsonl   one JSON object per line, ascending t (except `stream` lines, appended at stop)
 ```
 
+`render` also writes derived files into the same dir, all safe to delete: `render.mp4` / `preview.mp4`
+(+ a sibling `.srt` when `--captions` burned captions in), `still-<t>.png`, and `captions.json` — the
+cached whisper transcript, keyed on `mic.flac`'s size+mtime so re-renders never pay for it twice.
+
 ## Clock
 
 `t = 0` is the moment `rec` started (`time.monotonic_ns()` recorded in the manifest). Every event `t` and every stream offset is **seconds since t = 0, float**. Streams start late by a few hundred ms each; `rec` measures each stream's first-frame time and writes it as `offset_s`, and `render` shifts by it. Nothing else may assume the streams begin at 0.
