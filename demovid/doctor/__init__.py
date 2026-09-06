@@ -263,6 +263,15 @@ def checks(out_root: Path) -> list[tuple[str, str, str]]:
     else:
         res.append((WARN, "mic", "no default source"))
 
+    # `--captions` only: sway-launched renders never read ~/.zshrc, so report which source has the key
+    from demovid.render.captions import KEY_FILE, openai_key
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        res.append((OK, "openai key", "OPENAI_API_KEY set (captions available in this shell)"))
+    elif openai_key():
+        res.append((OK, "openai key", f"{KEY_FILE} (captions available everywhere)"))
+    else:
+        res.append((WARN, "openai key", f"no key: --captions will fail. export OPENAI_API_KEY or write {KEY_FILE}"))
+
     try:
         st = shutil.disk_usage(out_root if out_root.exists() else out_root.parent)
         free_gb = st.free / 1e9

@@ -8,10 +8,28 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from demovid import CONFIG_DIR
 from demovid.render.timing import TimeMap
 
 API = "https://api.openai.com/v1/audio/transcriptions"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+KEY_FILE = Path(CONFIG_DIR).expanduser() / "openai_key"
+
+
+def openai_key() -> str | None:
+    """`OPENAI_API_KEY`, else `~/.config/demovid/openai_key`.
+
+    The env var only exists in interactive shells (it is exported from `~/.zshrc`), and the menu's
+    render runs from sway via kitty — no rc file, no key. The file covers that case; `doctor` reports
+    which source is in play.
+    """
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return KEY_FILE.read_text().strip() or None
+    except OSError:
+        return None
 
 
 def transcribe(mic: Path, cache: Path, language: str | None = None) -> list[dict]:
@@ -25,9 +43,10 @@ def transcribe(mic: Path, cache: Path, language: str | None = None) -> list[dict
                 return data["segments"]
         except (ValueError, KeyError):
             pass
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = openai_key()
     if not api_key:
-        raise SystemExit("--captions needs OPENAI_API_KEY in the environment")
+        raise SystemExit(f"--captions needs an OpenAI key: export OPENAI_API_KEY, or put it in {KEY_FILE} "
+                         f"(the menu's render runs from sway, which never reads ~/.zshrc)")
     with tempfile.TemporaryDirectory() as td:
         # mono 16 kHz mp3 keeps an hour under whisper's 25 MB limit; flac would not
         mp3 = Path(td) / "mic.mp3"

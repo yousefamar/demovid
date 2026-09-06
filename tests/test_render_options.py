@@ -75,3 +75,17 @@ def test_crop_events_shifts_and_drops():
 def test_crop_rect_of_the_preview_window():
     assert crop_rect([1512, 840, 384, 216], (960, 0, 960, 1080)) == [552, 840, 384, 216]
     assert crop_rect([0, 0, 100, 100], (960, 0, 960, 1080)) is None
+
+
+def test_openai_key_falls_back_to_the_config_file(tmp_path, monkeypatch):
+    from demovid.render import captions
+
+    monkeypatch.setattr(captions, "KEY_FILE", tmp_path / "openai_key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert captions.openai_key() is None                 # nothing anywhere
+    captions.KEY_FILE.write_text("sk-from-file\n")
+    assert captions.openai_key() == "sk-from-file"        # file, stripped
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    assert captions.openai_key() == "sk-from-env"         # env wins
+    monkeypatch.setenv("OPENAI_API_KEY", "   ")
+    assert captions.openai_key() == "sk-from-file"        # blank env is not a key
