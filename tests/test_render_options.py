@@ -14,15 +14,21 @@ def ns_for(argv: list[str]) -> argparse.Namespace:
 
 def test_preset_sets_untouched_options():
     ns = ns_for(["rec"])
-    changed = presets.apply(ns, DEFAULTS, "studio", explicit=set())
+    changed = presets.apply(ns, DEFAULTS, "framed", explicit=set())
     assert ns.pad == 0.06 and ns.idle_speed == 8.0
     assert "pad=0.06" in changed
+
+
+def test_studio_renders_full_bleed():
+    ns = ns_for(["rec"])
+    presets.apply(ns, DEFAULTS, "studio", explicit=set())
+    assert ns.pad == 0.0            # no margins by default; the padded look is `framed`
 
 
 def test_explicit_flag_beats_the_preset_even_when_it_equals_the_default(monkeypatch):
     ns = ns_for(["rec", "--idle-speed", "0"])
     monkeypatch.setattr("sys.argv", ["demovid", "render", "rec", "--idle-speed", "0"])
-    presets.apply(ns, DEFAULTS, "studio", explicit_dests(OPTIONS))
+    presets.apply(ns, DEFAULTS, "framed", explicit_dests(OPTIONS))
     assert ns.idle_speed == 0.0     # typed, so the preset's 8.0 must not win
     assert ns.pad == 0.06           # not typed, so the preset applies
 
@@ -37,7 +43,7 @@ def test_unknown_preset_and_unknown_key():
     with pytest.raises(SystemExit):
         presets.apply(ns_for(["rec"]), DEFAULTS, "nope")
     with pytest.raises(SystemExit):
-        presets.apply(ns_for(["rec"]), {"pad": 0.0}, "studio")   # 'bg' is not in these defaults
+        presets.apply(ns_for(["rec"]), {"pad": 0.0}, "framed")   # 'bg' is not in these defaults
 
 
 def test_parse_rect():
