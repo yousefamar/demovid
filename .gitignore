@@ -7,3 +7,9 @@ target/
 *.flac
 *.wav
 /recordings/
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+*.srt
+captions.json
+*.png

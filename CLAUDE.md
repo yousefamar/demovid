@@ -107,3 +107,11 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
 - screenstudio-alt-skill (Python, MIT) — headless events→render pipeline closest to ours; Mac logger, portable renderer.
 - Screenix — the incumbent; its data layout is our import format.
 - openscreen / Beam / Cap — editor/effect references; none track the cursor on Linux, Cap has no Linux at all.
+
+## Open threads (2026-09-06)
+- **Upload privacy**: Google's stated policy locks `videos.insert` from unaudited API projects created after 2020-07-28 to `private`; whether it bites this project is untested (`upload` exits 3 on a mismatch). If it does: the free compliance audit, another project's OAuth client, or a different target (VPS, R2, Drive).
+- **Taste defaults not yet confirmed by Yousef**: zoom cadence (`--zoom 1.8`, `--zoom-hold 2`) and cursor style (`dark`).
+- **Typing target**: the planner anchors typing to the last click; AT-SPI caret tracking would be exact (`python3-pyatspi`, Brave has `--force-renderer-accessibility`) but is not wired.
+- **Cursor gaps**: positions are per output commit, so a pointer gliding over a static screen goes unreported until something repaints; the renderer holds the last position across gaps (> 80 ms), which is right when the pointer is still and slightly late when it is not.
+- **Erased preview patch**: with the camera pinned to a fixed corner, a zoom that lands on that corner shows the inpainted patch where the live preview window was.
+- **Anything in `/usr/local`** (patched wlroots, patched wf-recorder, sway 1.11) can be shadowed or replaced by an apt upgrade; `demovid doctor` is the alarm.

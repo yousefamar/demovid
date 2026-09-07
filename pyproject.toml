@@ -2,7 +2,7 @@
 name = "demovid"
 version = "0.1.0"
 description = "CLI screen recorder for product demos: record raw + events, render zoom/cursor/PiP later"
-readme = "CLAUDE.md"
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,6 +14,10 @@ dependencies = [
     "av>=13.0",
     "pillow>=12.3.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yousefamar/demovid"
+Issues = "https://github.com/yousefamar/demovid/issues"
 
 [project.scripts]
 demovid = "demovid.cli:main"
