@@ -3,7 +3,7 @@
 Screen Studio, but for Yousef's machine: record the whole output at OS level, then render auto-zoom on clicks/focus, an enlarged smoothed cursor, a webcam PiP, and loudness-normalised audio. CLI only, single user. Project page + working docs live in the vault: `~/sync/brain/root/projects/demovid/` (`repo` symlinks back here; `index.md` = public brief, `research.md` = tool/lib survey with verified facts, `roadmap.md` = milestones + open decisions, `board.md` = kanban). Read `research.md` before touching capture code — most of the hard constraints are there.
 
 ## Git: commit to `main`, never branch
-Trunk-based like Console. No feature branches, no worktree branches that outlive the work — fold into `main` and delete. Ticket forks land on `main` too.
+Trunk-based like Console. No feature branches, no worktree branches that outlive the work — fold into `main` and delete. Ticket forks land on `main` too. **Remote: `github.com/yousefamar/demovid`, PUBLIC since 2026-09-06** — push after committing, and never commit anything identifying beyond what is already here (history was rewritten once to drop a GCP project number; the OpenAI key and OAuth token live under `~/.config/demovid/`, outside the repo).
 
 ## Architecture (decided)
 **Record raw + an event log; render afterwards.** Live effects are a dead end (bake decisions in, and the compositor gives a live client nothing to work with).
