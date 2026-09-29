@@ -122,6 +122,18 @@ def to_srt(segments: list[dict], mic_offset_s: float, tm: TimeMap, max_chars: in
     return "\n".join(lines)
 
 
+def to_text(segments: list[dict], mic_offset_s: float, tm: TimeMap) -> str:
+    """A readable transcript: one `[m:ss] text` line per segment inside the range, in output time."""
+    lines = []
+    for seg in segments:
+        a, b = seg["start"] + mic_offset_s, seg["end"] + mic_offset_s
+        if min(b, tm.t_to) - max(a, tm.t_from) < 0.15:
+            continue
+        m, sec = divmod(int(tm.out(max(a, tm.t_from))), 60)
+        lines.append(f"[{m}:{sec:02d}] {seg['text']}")
+    return "\n".join(lines) + "\n"
+
+
 def split_cue(text: str, a: float, b: float, max_chars: int) -> list[tuple[str, tuple[float, float]]]:
     """Long whisper segments become several cues, time split proportionally to text length."""
     words = text.split()

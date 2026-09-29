@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 
@@ -118,6 +119,107 @@ def parse_rect(s: str) -> tuple[int, int, int, int]:
     return tuple(parts)  # type: ignore[return-value]
 
 
+def select_range(ns: argparse.Namespace, events: list[dict], t_from: float, t_to: float
+                 ) -> tuple[float, float, list[tuple[float, float]]] | None:
+    """Apply --spans/--keep/--drop/--keep-pauses: returns (t_from, t_to, cut intervals), or None after
+    listing the spans. Spans where rec was paused are cut from the output; nothing that happened inside
+    them may drive the zoom, ripples or chips either (a click while paused must not leave the render
+    zoomed in)."""
+    from demovid.render.timing import parse_span_list, paused_intervals, recorded_spans
+
+    paused = [] if (ns.keep_pauses or getattr(ns, "still", None)) else paused_intervals(events, t_from, t_to)
+    spans = recorded_spans(events, t_from, t_to)
+    if ns.spans:
+        for i, (a, b) in enumerate(spans, 1):
+            print(f"span {i}: {fmt_time(a)} -> {fmt_time(b)}  ({b - a:.1f}s)")
+        print(f"{len(spans)} span(s); `--keep 1` or `--drop 2` select by number")
+        return None
+    if ns.keep or ns.drop:
+        try:
+            chosen = set(parse_span_list(ns.keep, len(spans))) if ns.keep else set(range(len(spans)))
+            chosen -= set(parse_span_list(ns.drop, len(spans))) if ns.drop else set()
+        except ValueError as e:
+            raise SystemExit(f"render: {e}")
+        if not chosen:
+            raise SystemExit("render: --keep/--drop left nothing to render")
+        # unwanted spans become cuts, exactly like pauses; the range shrinks to the kept extremes
+        dropped = [spans[i] for i in range(len(spans)) if i not in chosen]
+        paused = sorted(paused + dropped)
+        t_from, t_to = spans[min(chosen)][0], spans[max(chosen)][1]
+        paused = [(max(a, t_from), min(b, t_to)) for a, b in paused if min(b, t_to) > max(a, t_from)]
+        print(f"[spans] keeping {', '.join(str(i + 1) for i in sorted(chosen))} of {len(spans)}: "
+              f"{fmt_time(t_from)} -> {fmt_time(t_to)}")
+    return t_from, t_to, paused
+
+
+def audio_tracks(rec: Path, streams: dict, denoise: bool) -> list:
+    """The recording's audio streams, mic first (captions and speech detection follow tracks[0]'s clock)."""
+    from demovid.render.media import AudioTrack
+
+    return [AudioTrack(name, rec / st["file"], float(st.get("offset_s") or 0.0), denoise=name == "mic" and denoise)
+            for name in ("mic", "system") if (st := streams.get(name))]
+
+
+def render_audio(ns: argparse.Namespace, rec: Path, streams: dict, events: list[dict]) -> int:
+    """An audio-only recording (`rec --audio-only`, no screen stream): the same levelled mix the video
+    render would carry, as <dir>/render.m4a, with pauses cut; --captions writes .srt and a plain .txt."""
+    import subprocess
+
+    from demovid.render.media import audio_chain, probe_duration
+    from demovid.render.timing import TimeMap, cuts
+
+    tracks = audio_tracks(rec, streams, not ns.no_denoise)
+    if not tracks or ns.no_audio:
+        raise SystemExit("render: this recording has no screen and no audio track to render")
+    first = min(tr.offset_s for tr in tracks)
+    t_from = max(ns.t_from if ns.t_from is not None else 0.0, first)
+    t_end_default = max(tr.offset_s + probe_duration(tr.path) for tr in tracks)
+    t_to = min(ns.t_to, t_end_default) if ns.t_to is not None else t_end_default
+    if t_to <= t_from:
+        raise SystemExit(f"empty range {t_from}..{t_to}")
+    selected = select_range(ns, events, t_from, t_to)
+    if selected is None:
+        return 0
+    t_from, t_to, paused = selected
+    tm = TimeMap(t_from, t_to, cuts(paused))
+    if paused:
+        print(f"[pause] {len(paused)} paused span(s) cut, {sum(b - a for a, b in paused):.1f}s")
+    out = Path(ns.out).expanduser() if ns.out else rec / "render.m4a"
+    graph, inputs = audio_chain(tracks, t_from, t_to, tm.audio_keep() if tm.segments else None, pad=False)
+    cmd = ["ffmpeg", "-v", "error", "-nostats", "-hide_banner", "-y"]
+    for path, seek, duration in inputs:
+        if seek > 0:
+            cmd += ["-ss", f"{seek:.6f}"]
+        if duration is not None:
+            cmd += ["-t", f"{duration:.6f}"]
+        cmd += ["-i", str(path)]
+    # the graph reads [1:a].. because the video encoder's input 0 is the frame pipe; shift the labels
+    graph = re.sub(r"\[(\d+):a\]", lambda m: f"[{int(m.group(1)) - 1}:a]", graph)
+    cmd += ["-filter_complex", graph, "-map", "[aout]", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+            "-movflags", "+faststart", str(out)]
+    print(f"[render] {rec.name}: audio only, {t_from:.2f}..{t_to:.2f}s -> {tm.duration:.1f}s, "
+          f"{'+'.join(tr.name for tr in tracks)} -> {out}", flush=True)
+    started = time.time()
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip())
+        return 1
+    if ns.captions:
+        from demovid.render.captions import to_srt, to_text, transcribe
+
+        segments = transcribe(tracks, rec / "captions.json", ns.captions_lang)
+        out.with_suffix(".srt").write_text(to_srt(segments, tracks[0].offset_s, tm))
+        out.with_suffix(".txt").write_text(to_text(segments, tracks[0].offset_s, tm))
+        print(f"[captions] {len(segments)} segments -> {out.with_suffix('.srt')} + .txt")
+    print(f"[render] {tm.duration:.1f}s of audio in {time.time() - started:.0f}s -> {out}")
+    try:
+        from demovid.island import refresh
+        refresh()
+    except Exception:
+        pass
+    return 0
+
+
 def main(ns: argparse.Namespace) -> int:
     import cv2
 
@@ -125,11 +227,10 @@ def main(ns: argparse.Namespace) -> int:
     from demovid.render.chips import chips_from_events
     from demovid.render.compositor import Compositor, Look
     from demovid.render.cursor import CursorRefiner, CursorTrack, ShapeTrack
-    from demovid.render.media import (AsyncEncoder, AudioTrack, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration,
+    from demovid.render.media import (AsyncEncoder, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration,
                                       silences)
     from demovid.render.planner import Keyframe, PlanConfig, plan
-    from demovid.render.timing import (IdleConfig, TimeMap, compress, cuts, idle_intervals, parse_span_list,
-                                       paused_intervals, recorded_spans, subtract)
+    from demovid.render.timing import IdleConfig, TimeMap, compress, cuts, idle_intervals, subtract
 
     if ns.list_presets:
         print(presets.describe())
@@ -143,8 +244,10 @@ def main(ns: argparse.Namespace) -> int:
     rec = Path(ns.dir).expanduser()
     manifest = json.loads((rec / "manifest.json").read_text())
     events = load_events(rec / "events.jsonl")
-    src_w, src_h = int(manifest["output"]["width"]), int(manifest["output"]["height"])
     streams = manifest["streams"]
+    if "screen" not in streams:
+        return render_audio(ns, rec, streams, events)
+    src_w, src_h = int(manifest["output"]["width"]), int(manifest["output"]["height"])
     screen = streams["screen"]
     screen_path = rec / screen["file"]
     screen_offset = float(screen.get("offset_s", 0.0))
@@ -169,30 +272,10 @@ def main(ns: argparse.Namespace) -> int:
     if t_to <= t_from:
         raise SystemExit(f"empty range {t_from}..{t_to}")
 
-    # spans where rec was paused are cut from the output; nothing that happened inside them may drive
-    # the zoom, ripples or chips either (a click while paused must not leave the render zoomed in)
-    paused = [] if (ns.keep_pauses or ns.still) else paused_intervals(events, t_from, t_to)
-    spans = recorded_spans(events, t_from, t_to)
-    if ns.spans:
-        for i, (a, b) in enumerate(spans, 1):
-            print(f"span {i}: {fmt_time(a)} -> {fmt_time(b)}  ({b - a:.1f}s)")
-        print(f"{len(spans)} span(s); `--keep 1` or `--drop 2` select by number")
+    selected = select_range(ns, events, t_from, t_to)
+    if selected is None:
         return 0
-    if ns.keep or ns.drop:
-        try:
-            chosen = set(parse_span_list(ns.keep, len(spans))) if ns.keep else set(range(len(spans)))
-            chosen -= set(parse_span_list(ns.drop, len(spans))) if ns.drop else set()
-        except ValueError as e:
-            raise SystemExit(f"render: {e}")
-        if not chosen:
-            raise SystemExit("render: --keep/--drop left nothing to render")
-        # unwanted spans become cuts, exactly like pauses; the range shrinks to the kept extremes
-        dropped = [spans[i] for i in range(len(spans)) if i not in chosen]
-        paused = sorted(paused + dropped)
-        t_from, t_to = spans[min(chosen)][0], spans[max(chosen)][1]
-        paused = [(max(a, t_from), min(b, t_to)) for a, b in paused if min(b, t_to) > max(a, t_from)]
-        print(f"[spans] keeping {', '.join(str(i + 1) for i in sorted(chosen))} of {len(spans)}: "
-              f"{fmt_time(t_from)} -> {fmt_time(t_to)}")
+    t_from, t_to, paused = selected
     live_events = [e for e in events if not any(a <= float(e.get("t", 0.0)) < b for a, b in paused)] if paused else events
 
     if ns.no_zoom:
@@ -203,9 +286,7 @@ def main(ns: argparse.Namespace) -> int:
     if ns.plan_json:
         Path(ns.plan_json).write_text(json.dumps([k.as_dict() for k in keyframes], indent=1))
 
-    # mic first: captions and speech detection are aligned to tracks[0]'s clock
-    tracks = [AudioTrack(name, rec / st["file"], float(st.get("offset_s") or 0.0), denoise=name == "mic" and not ns.no_denoise)
-              for name in ("mic", "system") if (st := streams.get(name))] if not ns.no_audio else []
+    tracks = audio_tracks(rec, streams, not ns.no_denoise) if not ns.no_audio else []
     audio = bool(tracks)
     audio_offset = tracks[0].offset_s if tracks else 0.0
 

@@ -207,3 +207,20 @@ def test_system_audio_is_off_by_default_and_flags_beat_the_pref():
     assert _options(rec_ns([])).system_source == "default"
     assert _options(rec_ns(["--no-system-audio"])).system_source is None
     assert _options(rec_ns(["--system-source", "demovid_test.monitor"])).system_source == "demovid_test.monitor"
+
+
+def test_audio_only_is_the_meeting_mode():
+    o = _options(rec_ns(["--audio-only"]))
+    assert o.audio_only and o.cam_device is None and o.preview is False and o.log_keys is False
+    assert o.mic_source == "default" and o.system_source == "default"   # PC audio on unless refused
+    assert _options(rec_ns(["--audio-only", "--no-system-audio"])).system_source is None
+    assert _options(rec_ns([])).audio_only is False
+
+
+def test_menu_offers_an_audio_recording_when_idle(monkeypatch):
+    monkeypatch.setattr(menu, "latest", lambda: None)
+    items = menu.entries()
+    assert items[1][1] == "start-audio" and "mic + PC" in items[1][0]
+    monkeypatch.setattr("demovid.rec.status",
+                        lambda: {"recording": True, "paused": False, "dir": "/x", "pid": 1, "elapsed_s": 5.0})
+    assert "start-audio" not in [a for _, a in menu.entries()]

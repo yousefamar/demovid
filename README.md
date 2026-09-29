@@ -43,7 +43,7 @@ Bar button: point a waybar `custom` module at `scripts/waybar-demovid` (`return-
 
 ## Using it
 
-**Record.** `demovid rec` starts; run it again to stop. Output goes to `~/Videos/demovid/<timestamp>/` as `screen.mp4`, `cam.mp4`, `mic.flac`, `events.jsonl`, `manifest.json` (see [FORMAT.md](FORMAT.md)). From the bar: click to open the menu and start; while recording, one click pauses; while paused, the menu offers Resume or Stop. `--no-keys` if you will type a password. `--system-audio` (or the menu's **PC audio** toggle) also records what the PC plays to `system.flac` — turn it on for a call and both sides end up in the render.
+**Record.** `demovid rec` starts; run it again to stop. Output goes to `~/Videos/demovid/<timestamp>/` as `screen.mp4`, `cam.mp4`, `mic.flac`, `events.jsonl`, `manifest.json` (see [FORMAT.md](FORMAT.md)). From the bar: click to open the menu and start; while recording, one click pauses; while paused, the menu offers Resume or Stop. `--no-keys` if you will type a password. `--system-audio` (or the menu's **PC audio** toggle) also records what the PC plays to `system.flac` — turn it on for a call and both sides end up in the render. For a meeting you do not want the screen for, `demovid rec --audio-only` (menu: **Start audio recording**) records just mic + PC audio; `render` then produces `render.m4a` (and a `.txt` transcript with `--captions`).
 
 **Render.** `demovid render <dir>` writes `render.mp4` next to the sources. Useful flags:
 

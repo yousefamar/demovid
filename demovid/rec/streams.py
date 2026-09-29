@@ -332,9 +332,17 @@ def system_stream(out_dir: Path, clock: Clock, source: str, sample_rate: int = 4
     return pulse_stream("system", "system.flac", out_dir, clock, source, channels=2, sample_rate=sample_rate)
 
 
-def unsuspend_source(source: str) -> None:
-    """The C615 emits ~150 ms of garbage when it wakes from SUSPENDED; wake it well before capture."""
-    subprocess.run(["pactl", "suspend-source", source, "0"], capture_output=True, timeout=5)
+WAKE_CAPTURE_S = 0.4
+
+
+def wake_source(source: str) -> subprocess.Popen:
+    """A throwaway capture that wakes a suspended source and swallows the C615's ~170 ms of full-scale
+    wake garbage, so the real capture opens a device that is already running. `pactl suspend-source X 0`
+    does nothing on PipeWire (the node stays SUSPENDED until a stream connects). Wait for it to exit."""
+    return subprocess.Popen(
+        ["ffmpeg", "-v", "quiet", "-nostdin", "-f", "pulse", "-i", source, "-t", str(WAKE_CAPTURE_S), "-f", "null", "-"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent,
+    )
 
 
 def tool_versions() -> dict[str, str]:

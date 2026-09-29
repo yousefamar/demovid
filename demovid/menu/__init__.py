@@ -1,7 +1,7 @@
 """demovid menu: what the waybar button opens (fuzzel --dmenu).
 
-Start/stop, toggle what the next recording captures, and the follow-up actions (render, upload,
-open, doctor). Toggles write demovid/prefs.py, so they stick until changed.
+Start/stop (screen, or audio only for a meeting), toggle what the next recording captures, and the
+follow-up actions (render, upload, open, doctor). Toggles write demovid/prefs.py, so they stick until changed.
 """
 
 import argparse
@@ -48,6 +48,7 @@ def entries() -> list[tuple[str, str]]:
         out.append((f"{ICONS['stop']}  Stop recording", "toggle-rec"))
     else:
         out.append((f"{ICONS['start']}  Start recording", "toggle-rec"))
+        out.append((f"{ICONS['mic']}  Start audio recording (mic + PC)", "start-audio"))
     suffix = "  (next recording)" if st["recording"] else ""
     values = prefs.load()
     for name in ("cam", "preview", "mic", "system_audio", "keys", "hide_cursor"):
@@ -111,6 +112,8 @@ def run(action: str) -> int:
 
     if action == "toggle-rec":
         return subprocess.run([sys.executable, "-m", "demovid.cli", "rec"]).returncode
+    if action == "start-audio":
+        return subprocess.run([sys.executable, "-m", "demovid.cli", "rec", "--audio-only"]).returncode
     if action == "toggle-pause":
         return subprocess.run([sys.executable, "-m", "demovid.cli", "rec", "--pause"]).returncode
     if action.startswith("toggle:"):

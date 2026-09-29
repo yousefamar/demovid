@@ -255,7 +255,7 @@ def _loudnorm(track: AudioTrack, pre: list[str], seek: float, duration: float | 
 
 
 def audio_chain(tracks: list[AudioTrack], t_from: float, t_to: float | None,
-                keep: list[tuple[float, float]] | None = None) -> tuple[str, list[tuple[Path, float, float | None]]]:
+                keep: list[tuple[float, float]] | None = None, pad: bool = True) -> tuple[str, list[tuple[Path, float, float | None]]]:
     """The encoder's audio: every track levelled to -14 LUFS (two-pass loudnorm, afftdn first where
     `denoise`), then, with more than one, summed as stereo and limited. Returns the filter_complex graph
     (inputs `[1:a]`.., output `[aout]`) and the (path, seek, duration) per input, in order.
@@ -263,8 +263,10 @@ def audio_chain(tracks: list[AudioTrack], t_from: float, t_to: float | None,
     Each track starts at its own offset_s on the recording clock; the render starts at t_from. A track
     that starts after t_from is padded with silence via adelay, one that started before is seeked into.
     `keep` = source-time intervals to keep (idle speed-up drops the rest); filter time is t - t_from.
+    `pad` appends apad for a video encode (-shortest ends it); an audio-only output must not pad.
     """
     duration = (t_to - t_from) if t_to is not None else None
+    tail = ",apad[aout]" if pad else "[aout]"
     inputs: list[tuple[Path, float, float | None]] = []
     chains: list[str] = []
     for i, tr in enumerate(tracks, start=1):
@@ -276,8 +278,8 @@ def audio_chain(tracks: list[AudioTrack], t_from: float, t_to: float | None,
             chain += ["aresample=48000", "aformat=channel_layouts=stereo"]
         chains.append(f"[{i}:a]{','.join(chain)}[a{i}]")
     if len(tracks) == 1:
-        graph = ";".join(chains).removesuffix("[a1]") + ",apad[aout]"
+        graph = ";".join(chains).removesuffix("[a1]") + tail
     else:
         labels = "".join(f"[a{i}]" for i in range(1, len(tracks) + 1))
-        graph = ";".join(chains) + f";{labels}amix=inputs={len(tracks)}:normalize=0:duration=longest,{MIX_LIMITER},apad[aout]"
+        graph = ";".join(chains) + f";{labels}amix=inputs={len(tracks)}:normalize=0:duration=longest,{MIX_LIMITER}{tail}"
     return graph, inputs

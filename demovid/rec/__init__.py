@@ -24,6 +24,8 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--status", action="store_true", help="print recording state as JSON")
     p.add_argument("--waybar", action="store_true", help="print a waybar custom-module JSON line")
     p.add_argument("--fg", action="store_true", help="record in the foreground (Ctrl-C stops)")
+    p.add_argument("--audio-only", action="store_true",
+                   help="a meeting: record the mic and PC audio only, no screen/camera/cursor/keys")
     p.add_argument("--daemon", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--out-root", type=Path, default=Path("~/Videos/demovid").expanduser())
     p.add_argument("--output", help="Sway output name (default: the focused one)")
@@ -67,17 +69,20 @@ def _options(ns: argparse.Namespace):
     saved = prefs.load()
     cam = saved["cam"] if ns.cam is None else ns.cam
     mic = saved["mic"] if ns.mic is None else ns.mic
-    system_audio = saved["system_audio"] if ns.system_audio is None else ns.system_audio
+    # audio-only is the meeting mode: PC audio is on unless --no-system-audio says otherwise
+    system_audio = (saved["system_audio"] if ns.system_audio is None else ns.system_audio) or (
+        ns.audio_only and ns.system_audio is None)
     preview = saved["preview"] if ns.preview is None else ns.preview
     keys = saved["keys"] if ns.keys is None else ns.keys
     hide_cursor = saved["hide_cursor"] if ns.hide_cursor is None else ns.hide_cursor
     return RecOptions(
         out_root=ns.out_root, output=ns.output, fps=ns.fps, cq=ns.cq,
-        cam_device=ns.cam_device if cam else None, cam_size=ns.cam_size, cam_fps=ns.cam_fps,
+        cam_device=ns.cam_device if cam and not ns.audio_only else None, cam_size=ns.cam_size, cam_fps=ns.cam_fps,
         mic_source=ns.mic_source if mic else None,
         system_source=ns.system_source if system_audio else None,
-        preview=preview and cam, preview_size=ns.preview_size,
-        hide_cursor=hide_cursor, log_keys=keys, notify=not ns.no_notify,
+        preview=preview and cam and not ns.audio_only, preview_size=ns.preview_size,
+        hide_cursor=hide_cursor and not ns.audio_only, log_keys=keys and not ns.audio_only,
+        notify=not ns.no_notify, audio_only=ns.audio_only,
     )
 
 
@@ -88,7 +93,7 @@ def status() -> dict:
         paused_since = st.get("paused_since")
         paused = float(st.get("paused_total_s") or 0.0) + ((now - paused_since) if paused_since else 0.0)
         return {"recording": True, "dir": st["dir"], "pid": st["pid"],
-                "paused": paused_since is not None,
+                "paused": paused_since is not None, "audio_only": bool(st.get("audio_only")),
                 "elapsed_s": round(now - st["started_at"] - paused, 1)}
     return {"recording": False, "paused": False, "stale": bool(st)}
 
@@ -161,7 +166,7 @@ def main(ns: argparse.Namespace) -> int:
         s = status()
         if s["recording"]:
             m, sec = divmod(int(s["elapsed_s"]), 60)
-            icon, cls = ("\u23f8", "paused") if s["paused"] else ("\u25cf", "recording")
+            icon, cls = ("\u23f8", "paused") if s["paused"] else ("\uf130" if s["audio_only"] else "\u25cf", "recording")
             out = {"text": f"{icon} {m}:{sec:02d}", "class": cls, "tooltip": s["dir"]}
         else:
             out = {"text": "", "class": "idle", "tooltip": "demovid: idle"}

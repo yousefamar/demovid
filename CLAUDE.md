@@ -10,6 +10,7 @@ Trunk-based like Console. No feature branches, no worktree branches that outlive
 
 ```
 demovid rec      → ~/Videos/demovid/<ts>/{manifest.json, screen.mp4, cam.mp4, mic.flac, [system.flac], events.jsonl}
+                   (--audio-only: mic.flac + system.flac only; render → render.m4a)
 demovid render   → events → zoom plan (pure fn) → composite → NVENC mp4
 demovid upload   → YouTube unlisted (Data API, resumable) → URL on the clipboard (wl-copy)
 ```
@@ -32,7 +33,7 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
 - **Sway 1.12 / wlroots 0.20 is NOT worth it here** (checked 2026-09-06 against the real 0.20.0 tarball): it wants `libdrm >= 2.4.129` (apt 24.04 has 2.4.125) and `xkbcommon >= 1.8.0` (apt has 1.6.0). Both have meson `fallback:` wraps, so it *would* build, but installing to `/usr/local` shadows the xkbcommon that sway, waybar and Brave all link — a session-wide risk. Toplevel capture would only add capture-time region recording; `render --crop/--window` already gives region output from the full-screen recording, and re-framing later is the better fit for record-raw-render-later. Revisit when Ubuntu ships the newer libs.
 - **Preview/GUI on this box**: `mpv` is NOT installed (only a shell alias), ffmpeg's `sdl2` output creates a window Sway never maps (Xwayland/EGL on NVIDIA), so the webcam preview is `ffmpeg → rawvideo pipe → gst-launch-1.0 fdsrc ! rawvideoparse ! videoconvert ! waylandsink` (app_id is always `gst-launch-1.0`, match by pid). `libgtk-layer-shell.so.0` exists without a GI typelib — `tests/syncprobe/clockwindow.py` drives it via ctypes for an always-on-top overlay.
 - **keyd grabs every keyboard** (`/etc/keyd/default.conf` ids `*`): physical nodes are silent, remapped keys come from `keyd virtual keyboard`. `rec` reads every key/button-capable evdev node (EVIOCSCLOCKID → monotonic timestamps), so each press is logged exactly once, tagged with `dev`.
-- **Stream clocks (measured 2026-09-04, `tests/syncprobe/`)**: wf-recorder's first frame ≈ arrival of its stdout `Using video filter` line − 1.5 ms; v4l2 pts are CLOCK_MONOTONIC (`start:` in ffmpeg's input dump); pulse pts are wall clock minus reported latency but early packets arrive late, so the mic start is the median of per-packet implied starts 0.5–2.5 s after spawn (`ashowinfo`, `-copyts`). Results: screen capture times consistent to 6 ms (p5–p95) across 3517 frames; mic clicks repeatable to 1.8 ms with ~83 ms total playback-path latency that the HDMI sink's quantum 2048 + ALSA buffer accounts for; cam within ~1 frame at 30 fps (weak room-light signal). The C615 mic emits ~150 ms of garbage when woken from SUSPENDED → `rec` unsuspends it ≥ 0.4 s before capture. SIGINT streams *together* — sequential stop made the mic run 0.5 s long.
+- **Stream clocks (measured 2026-09-04, `tests/syncprobe/`)**: wf-recorder's first frame ≈ arrival of its stdout `Using video filter` line − 1.5 ms; v4l2 pts are CLOCK_MONOTONIC (`start:` in ffmpeg's input dump); pulse pts are wall clock minus reported latency but early packets arrive late, so the mic start is the median of per-packet implied starts 0.5–2.5 s after spawn (`ashowinfo`, `-copyts`). Results: screen capture times consistent to 6 ms (p5–p95) across 3517 frames; mic clicks repeatable to 1.8 ms with ~83 ms total playback-path latency that the HDMI sink's quantum 2048 + ALSA buffer accounts for; cam within ~1 frame at 30 fps (weak room-light signal). The C615 mic emits ~170 ms of FULL-SCALE garbage when woken from SUSPENDED, randomly (2 of 5 wakes, 2026-09-29) — and `pactl suspend-source X 0` is a no-op on PipeWire (the node stays SUSPENDED until a stream connects), so the old "unsuspend 0.4 s early" never did anything: every recording risked a click at the head of mic.flac. `rec` now runs `streams.wake_source()` — a throwaway 0.4 s ffmpeg capture spawned first thing in `Session.run()` — and starts the real mic capture only after it exits (5/5 clean from a confirmed-suspended device). Costs ~0.65 s of mic start latency; the other streams are unaffected. SIGINT streams *together* — sequential stop made the mic run 0.5 s long.
 
 ## Conventions
 - **Idle speed-up** (`render --idle-speed N`): `render/timing.py` is pure — `idle_intervals()` finds stretches with no input (a cursor sample only counts as input if the pointer MOVED ≥2 px; Screenix logs positions while still) and, unless `--idle-ignore-speech`, no speech; `TimeMap` is the piecewise-linear source↔output clock that the render loop, the audio `aselect` and the caption timings all read, so they cannot drift apart. Speech detection is `media.silences()`: per-100 ms RMS via `asetnsamples` + `astats` (NB `astats`' `reset=` counts FRAMES, not samples — without `asetnsamples` you get one window for the whole file), then `speech_threshold()` = noise-floor mode + 6 dB. A fixed dBFS threshold does not work: this mic sits at ≈ −29 dBFS speech / ≈ −36 dBFS room, so `silencedetect=noise=-35dB` finds nothing.
@@ -99,6 +100,16 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   in the render at the right output time, mix peak 0.83. Test that way — never play into his real sink.
   The monitor of a sink is the sink's OWN output: with speakers rather than headphones, the mic also hears
   the far side a few ms later (slight echo in the mix); headphones avoid it.
+- **Audio-only recording** (`rec --audio-only`, menu "Start audio recording (mic + PC)", asked for 2026-09-29 —
+  "how do I do recording only?"): `RecOptions.audio_only` skips the screen, cam, cursor session, evdev and
+  Sway loggers; PC audio defaults ON in this mode unless `--no-system-audio`; the mic is `streams[0]` and
+  plays the "primary stream" role (its death aborts). State/`rec --status` carry `audio_only`, the bar shows
+  a mic glyph instead of the red dot. `render` branches on the missing `screen` stream → `render_audio()`:
+  `select_range()` (shared with the video path: --spans/--keep/--drop/--keep-pauses), the same
+  `audio_chain(pad=False)` graph (labels shifted down by one since there is no frame pipe at input 0) →
+  `render.m4a`; `--captions` adds `.srt` + `captions.to_text()` `.txt`. The island lists `.m4a` renders; the
+  menu's Upload entry stays mp4-only (YouTube). Tested end to end in `tests/test_audio_mix.py` with real
+  ffmpeg (two tones, a pause cut).
 - **`demovid/prefs.py`**: sticky `rec` defaults (`cam`, `preview`, `mic`, `system_audio`, `keys`, `hide_cursor`) in
   `~/.config/demovid/prefs.json`, which the menu toggles. A pref is only a DEFAULT — `rec` takes both
   polarities (`--cam`/`--no-cam`, `--keys`/`--no-keys`, `--hide-cursor`/`--show-cursor`, all defaulting to

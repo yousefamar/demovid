@@ -77,3 +77,46 @@ def test_captions_mix_aligns_the_other_tracks_to_the_first():
                  "[a0][a1]amix=inputs=2:normalize=0:duration=longest[aout]")
     early = AudioTrack("system", SYS.path, 0.10)
     assert "atrim=start=0.200000,asetpts=PTS-STARTPTS" in captions.mix_graph([MIC, early])
+
+
+def test_audio_chain_without_padding_for_audio_only_output(monkeypatch):
+    stub_loudnorm(monkeypatch)
+    graph, _ = audio_chain([MIC, SYS], 0.0, 5.0, pad=False)
+    assert graph.endswith(f"{media.MIX_LIMITER}[aout]") and "apad" not in graph
+
+
+def test_render_of_an_audio_only_recording_mixes_and_cuts_pauses(tmp_path):
+    """Real ffmpeg: two 6 s tones, a 2 s pause in the middle -> a 4 s m4a with both frequencies."""
+    import json
+    import subprocess
+
+    import numpy as np
+
+    from demovid.render import add_args, main
+    import argparse
+
+    rec = tmp_path / "2026-01-01-00-00-00"
+    rec.mkdir()
+    for name, hz in (("mic", 440), ("system", 1000)):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency={hz}:duration=6",
+                        "-ar", "48000", "-ac", "1" if name == "mic" else "2", str(rec / f"{name}.flac")], check=True)
+    (rec / "manifest.json").write_text(json.dumps({
+        "version": 1, "duration_s": 6.5, "output": {"name": "HDMI-A-1", "width": 1920, "height": 1080},
+        "streams": {"mic": {"file": "mic.flac", "offset_s": 0.5, "sample_rate": 48000, "channels": 1},
+                    "system": {"file": "system.flac", "offset_s": 0.5, "sample_rate": 48000, "channels": 2}},
+        "source": "demovid"}))
+    (rec / "events.jsonl").write_text('{"t": 2.5, "kind": "pause"}\n{"t": 4.5, "kind": "resume"}\n')
+    p = argparse.ArgumentParser()
+    add_args(p)
+    out = tmp_path / "out.m4a"
+    assert main(p.parse_args([str(rec), "-o", str(out)])) == 0
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],
+                               capture_output=True, text=True).stdout)
+    assert abs(dur - 4.0) < 0.15, dur
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-ac", "1", "-f", "f32le", "-"], capture_output=True).stdout
+    x = np.frombuffer(raw, np.float32)
+    spec = np.abs(np.fft.rfft(x[:48000 * 3]))
+    hz = np.fft.rfftfreq(48000 * 3, 1 / 48000)
+    peaks = {int(round(hz[i])) for i in np.argsort(spec)[-2:]}
+    assert peaks == {440, 1000}, peaks
+    assert 0.5 < np.abs(x).max() <= 0.9

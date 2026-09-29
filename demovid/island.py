@@ -21,7 +21,8 @@ def recordings(root: Path = Path(RECORDINGS_DIR).expanduser(), limit: int = 8) -
             m = json.loads((d / "manifest.json").read_text())
         except (OSError, ValueError):
             continue
-        renders = sorted((p for p in d.glob("*.mp4") if p.name not in STREAM_FILES), key=os.path.getmtime, reverse=True)
+        renders = sorted((p for p in [*d.glob("*.mp4"), *d.glob("*.m4a")] if p.name not in STREAM_FILES),
+                         key=os.path.getmtime, reverse=True)
         out.append({
             "name": d.name, "path": str(d),
             "duration_s": m.get("duration_s"), "source": m.get("source", "demovid"),

@@ -15,10 +15,10 @@ from .events import EventLog
 from .inputs import InputLogger
 from .state import clear_state, log_path, poke_waybar, write_state
 from .streams import (Preview, Stream, cam_stream, mic_stream, screen_stream, system_stream, tool_versions,
-                      unsuspend_source, wait_first_frames, wf_supports_no_cursor)
+                      wait_first_frames, wake_source, wf_supports_no_cursor)
 
 FIRST_FRAME_TIMEOUT_S = 8.0
-MIC_WAKE_S = 0.4
+MIC_WAKE_TIMEOUT_S = 3.0
 
 
 @dataclass
@@ -37,6 +37,7 @@ class RecOptions:
     hide_cursor: bool = False
     log_keys: bool = True
     notify: bool = True
+    audio_only: bool = False    # a meeting: mic + PC audio, no screen/cam/cursor/input capture
 
 
 @dataclass
@@ -89,6 +90,16 @@ class Session:
         self.dir.mkdir(parents=True, exist_ok=False)
         self.events = EventLog(self.dir / "events.jsonl", self.clock)
 
+        # wake the mic first thing: its ADC needs a real consumer to start and spits garbage while it does
+        self.mic_source = None
+        mic_waker: subprocess.Popen | None = None
+        if o.mic_source:
+            self.mic_source = audio.default_source() if o.mic_source == "default" else o.mic_source
+            if self.mic_source:
+                mic_waker = wake_source(self.mic_source)
+            else:
+                self.log("no default audio source, skipping mic")
+
         self.conn = sway.connect()
         self.output = sway.pick_output(self.conn, o.output)
         self.sway_version = self.conn.get_version().human_readable
@@ -99,73 +110,81 @@ class Session:
         self.cursor_session: cursor.CursorSession | None = None
         self.cursor_source = "none"
         self.shapes_dir = self.dir / cursor.SHAPES_DIR
-        if sway.wake_output(self.conn, self.output.name):
-            self.log(f"{self.output.name} was powered off (swayidle); woken for capture")
         self.theme, self.theme_size = sway.current_xcursor_theme()
-        try:
-            cs = cursor.CursorSession(self.events, self.clock, self.output.name, self.output.scale,
-                                      shapes_dir=self.shapes_dir, theme=self.theme, theme_size=self.theme_size)
-            cs.start()
-            self.cursor_session = cs
-        except Exception as e:
-            self.log(f"cursor session unavailable ({e}); cursor_source=none")
-        self.tracking = self._wait_for_cursor()
-        if self.tracking:
-            self.cursor_source = cursor.SOURCE_NAME
-        overlay_cursor = not self.tracking
-        if self.tracking and not wf_supports_no_cursor():
-            self.log("wf-recorder has no --no-cursor (unpatched build): recording the cursor overlay, which "
-                     "forces a software cursor and will stop position tracking")
-            overlay_cursor = True
-
-        self.streams: list[Stream] = [
-            screen_stream(self.dir, self.output.name, o.fps, cq=o.cq, overlay_cursor=overlay_cursor)]
-        cam_dev = o.cam_device if o.cam_device and Path(o.cam_device).exists() else None
-        if o.cam_device and not cam_dev:
+        self.tracking = False
+        self.streams: list[Stream] = []
+        if not o.audio_only:
+            if sway.wake_output(self.conn, self.output.name):
+                self.log(f"{self.output.name} was powered off (swayidle); woken for capture")
+            try:
+                cs = cursor.CursorSession(self.events, self.clock, self.output.name, self.output.scale,
+                                          shapes_dir=self.shapes_dir, theme=self.theme, theme_size=self.theme_size)
+                cs.start()
+                self.cursor_session = cs
+            except Exception as e:
+                self.log(f"cursor session unavailable ({e}); cursor_source=none")
+            self.tracking = self._wait_for_cursor()
+            if self.tracking:
+                self.cursor_source = cursor.SOURCE_NAME
+            overlay_cursor = not self.tracking
+            if self.tracking and not wf_supports_no_cursor():
+                self.log("wf-recorder has no --no-cursor (unpatched build): recording the cursor overlay, which "
+                         "forces a software cursor and will stop position tracking")
+                overlay_cursor = True
+            self.streams.append(
+                screen_stream(self.dir, self.output.name, o.fps, cq=o.cq, overlay_cursor=overlay_cursor))
+        cam_dev = o.cam_device if o.cam_device and Path(o.cam_device).exists() and not o.audio_only else None
+        if o.cam_device and not cam_dev and not o.audio_only:
             self.log(f"camera {o.cam_device} not present, skipping cam")
         if cam_dev:
             self.streams.append(cam_stream(
                 self.dir, self.clock, cam_dev, *o.cam_size, o.cam_fps, self._preview_geometry()[2:] if o.preview else None,
             ))
-        self.mic_source = None
-        if o.mic_source:
-            self.mic_source = audio.default_source() if o.mic_source == "default" else o.mic_source
-            if self.mic_source:
-                unsuspend_source(self.mic_source)
-                self.streams.append(mic_stream(self.dir, self.clock, self.mic_source))
-            else:
-                self.log("no default audio source, skipping mic")
+        if self.mic_source:
+            self.streams.append(mic_stream(self.dir, self.clock, self.mic_source))
         self.system_source = None
         if o.system_source:
             self.system_source = audio.monitor_source() if o.system_source == "default" else o.system_source
             if self.system_source:
-                unsuspend_source(self.system_source)
                 self.streams.append(system_stream(self.dir, self.clock, self.system_source))
             else:
                 self.log("default sink has no monitor source, skipping system audio")
 
+        if not self.streams:
+            self._finish(aborted=True)
+            raise RuntimeError("nothing to record: no mic and no PC audio source")
+
         self.preview_rect: list[int] | None = None
         self._preview_placed = False
         self.preview: Preview | None = None
-        self.sway_logger = sway.SwayLogger(self.conn, self.events, self.output, on_new_window=self._place_preview)
-        self.sway_logger.log_initial_focus()
-        self.sway_logger.start()
+        self.sway_logger: sway.SwayLogger | None = None
+        self.inputs: InputLogger | None = None
+        if not o.audio_only:
+            self.sway_logger = sway.SwayLogger(self.conn, self.events, self.output, on_new_window=self._place_preview)
+            self.sway_logger.log_initial_focus()
+            self.sway_logger.start()
 
-        for s in self.streams:
-            if s.name == "mic":
-                time.sleep(max(0.0, MIC_WAKE_S - self.clock.now()))
+        # the mic goes last: it waits for its wake capture, the others need not
+        for s in sorted(self.streams, key=lambda s: s.name == "mic"):
+            if s.name == "mic" and mic_waker is not None:
+                try:
+                    mic_waker.wait(timeout=MIC_WAKE_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    mic_waker.kill()
+                    self.log("mic wake capture did not finish; starting the mic anyway")
             s.start(self.clock)
             self.log(f"{s.name}: pid {s.pid}: {' '.join(s.cmd)}")
             if s.name == "cam" and o.preview:
                 self._start_preview(s)
 
-        self.inputs = InputLogger(self.events, self.clock, self._cursor_pos, log_keys=o.log_keys,
-                                  window_at=self._window_at)
-        self.inputs.start()
-        self.log(f"evdev: {', '.join(self.inputs.device_names())}")
+        if not o.audio_only:
+            self.inputs = InputLogger(self.events, self.clock, self._cursor_pos, log_keys=o.log_keys,
+                                      window_at=self._window_at)
+            self.inputs.start()
+            self.log(f"evdev: {', '.join(self.inputs.device_names())}")
 
         self.cursor_hidden = False
-        if o.hide_cursor:
+        if o.hide_cursor and not o.audio_only:
             sway.set_xcursor_theme(self.conn, blankcursor.ensure_theme(self.theme_size), self.theme_size)
             self.cursor_hidden = True
 
@@ -176,9 +195,10 @@ class Session:
             if s.offset_s is not None:
                 self.log(f"{s.name}: first frame at t={s.offset_s:.3f}s")
         dead = [s.name for s in self.streams if not s.alive()]
-        if "screen" in dead:
+        primary = self.streams[0]   # screen, or the mic when recording audio only
+        if primary.name in dead:
             self._finish(aborted=True)
-            raise RuntimeError("screen capture died at start:\n" + "\n".join(self.streams[0].log))
+            raise RuntimeError(f"{primary.name} capture died at start:\n" + "\n".join(primary.log))
         for name in dead:
             self.log(f"{name} died at start; continuing without it")
         for name in missing:
@@ -189,12 +209,13 @@ class Session:
         warn = audio.mic_warning(self.mic_source) if self.mic_source else None
         if warn:
             self.log("WARNING: " + warn)
-        self.notify("● REC", warn or f"{self.output.name} {o.fps}fps → {self.dir.name}")
+        what = " + ".join(s.name for s in self.streams) if o.audio_only else f"{self.output.name} {o.fps}fps"
+        self.notify("● REC", warn or f"{what} → {self.dir.name}")
         poke_waybar()
 
         while not self.stop_event.wait(0.25):
-            if not self.streams[0].alive():
-                self.error = "screen capture died mid-recording"
+            if not primary.alive():
+                self.error = f"{primary.name} capture died mid-recording"
                 self.log(self.error)
                 break
         return self._finish(aborted=False)
@@ -267,7 +288,7 @@ class Session:
         self.preview.run()
 
     def _place_preview(self, con) -> None:
-        if self._preview_placed or not self.preview or con.pid != self.preview.pid:
+        if self._preview_placed or not self.preview or not self.sway_logger or con.pid != self.preview.pid:
             return
         self._preview_placed = True
         self.sway_logger.ignore_ids.add(con.id)
@@ -288,6 +309,7 @@ class Session:
         write_state({
             "pid": os.getpid(),
             "dir": str(self.dir),
+            "audio_only": self.opts.audio_only,
             "started_at": self.clock.epoch_s,
             "paused_since": None if self.paused_since is None else self.clock.epoch_s + self.paused_since,
             "paused_total_s": round(self.paused_total_s, 3),
@@ -327,7 +349,7 @@ class Session:
                        "hidden_during_rec": self.cursor_hidden,
                        "shapes_dir": cursor.SHAPES_DIR if self.shapes_dir.is_dir() else None},
             "cursor_source": self.cursor_source,
-            "input_devices": self.inputs.device_names(),
+            "input_devices": self.inputs.device_names() if self.inputs else [],
             "tools": {"sway": self.sway_version, **tool_versions()},
             "source": "demovid",
         }
@@ -362,8 +384,10 @@ class Session:
             self.preview.stop()
         if self.cursor_session:
             self.cursor_session.stop()
-        self.inputs.stop()
-        self.sway_logger.stop()
+        if self.inputs:
+            self.inputs.stop()
+        if self.sway_logger:
+            self.sway_logger.stop()
         if self.cursor_hidden:
             try:
                 sway.set_xcursor_theme(self.conn, self.theme, self.theme_size)
