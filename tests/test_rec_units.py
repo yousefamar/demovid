@@ -1,6 +1,7 @@
 import json
 import struct
 import time
+from pathlib import Path
 
 from demovid.rec import audio, blankcursor, inputs, streams
 from demovid.rec.clock import Clock
@@ -60,7 +61,7 @@ def test_ffmpeg_marker_parses_input_start_once():
 def test_mic_marker_uses_median_of_implied_starts_in_window():
     c = Clock(monotonic_ns=0, epoch_s=1_700_000_000.0)
     spawn_t = 0.0
-    m = streams._MicMarker(c, 48000, lambda: spawn_t)
+    m = streams._PulseMarker(c, 48000, lambda: spawn_t)
     assert abs(m("  Duration: N/A, start: 1700000000.300000, bitrate: 768 kb/s", 0.3) - 0.3) < 1e-6
     # packets: true start 0.25 s; the first two report late (backlog), later ones are steady
     def line(n, pts_s):
@@ -110,3 +111,25 @@ def test_cli_status_when_idle(monkeypatch, tmp_path):
 
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     assert rec.status() == {"recording": False, "paused": False, "stale": False}
+
+
+def test_system_stream_reads_a_stereo_monitor_with_the_pulse_marker():
+    c = Clock(monotonic_ns=0, epoch_s=1_700_000_000.0)
+    s = streams.system_stream(Path("/tmp/x"), c, "alsa_output.hdmi.monitor")
+    assert s.name == "system" and s.file == "system.flac"
+    assert s.cmd[s.cmd.index("-i") + 1] == "alsa_output.hdmi.monitor"
+    assert s.cmd[s.cmd.index("-channels") + 1] == "2"
+    assert s.cmd[s.cmd.index("-fragment_size") + 1] == "3840"   # 20 ms of s16 stereo
+    assert isinstance(s.marker, streams._PulseMarker)
+    mic = streams.mic_stream(Path("/tmp/x"), c, "src")
+    assert mic.cmd[mic.cmd.index("-fragment_size") + 1] == "1920"
+
+
+def test_monitor_source_needs_a_listed_source(monkeypatch):
+    listing = "53\talsa_output.hdmi\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n" \
+              "53\talsa_output.hdmi.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n"
+    monkeypatch.setattr(audio, "_pactl", lambda *a: listing if a[0] == "list" else "alsa_output.hdmi\n")
+    assert audio.monitor_source() == "alsa_output.hdmi.monitor"
+    assert audio.monitor_source("alsa_output.other") is None
+    monkeypatch.setattr(audio, "_pactl", lambda *a: "")
+    assert audio.monitor_source() is None

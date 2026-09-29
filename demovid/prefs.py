@@ -15,6 +15,7 @@ SPEC: dict[str, tuple[bool, str]] = {
     "cam": (True, "Webcam recorded to cam.mp4"),
     "preview": (True, "Webcam preview window while recording"),
     "mic": (True, "Microphone recorded to mic.flac"),
+    "system_audio": (False, "PC audio (what you hear) recorded to system.flac"),
     "keys": (True, "Keystrokes logged to events.jsonl"),
     "hide_cursor": (False, "Blank the real cursor while recording"),
 }

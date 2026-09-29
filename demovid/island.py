@@ -11,7 +11,7 @@ from demovid import CONFIG_DIR, RECORDINGS_DIR
 
 ISLAND_DIR = Path("~/.config/console/canvas/islands").expanduser()
 SLUG = "demovid"
-STREAM_FILES = {"screen.mp4", "cam.mp4", "mic.flac"}
+STREAM_FILES = {"screen.mp4", "cam.mp4", "mic.flac", "system.flac"}
 
 
 def recordings(root: Path = Path(RECORDINGS_DIR).expanduser(), limit: int = 8) -> list[dict]:

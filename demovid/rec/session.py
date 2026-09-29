@@ -14,8 +14,8 @@ from .clock import Clock
 from .events import EventLog
 from .inputs import InputLogger
 from .state import clear_state, log_path, poke_waybar, write_state
-from .streams import (Preview, Stream, cam_stream, mic_stream, screen_stream, tool_versions, unsuspend_source,
-                      wait_first_frames, wf_supports_no_cursor)
+from .streams import (Preview, Stream, cam_stream, mic_stream, screen_stream, system_stream, tool_versions,
+                      unsuspend_source, wait_first_frames, wf_supports_no_cursor)
 
 FIRST_FRAME_TIMEOUT_S = 8.0
 MIC_WAKE_S = 0.4
@@ -31,6 +31,7 @@ class RecOptions:
     cam_size: tuple[int, int] = (1280, 720)
     cam_fps: int = 30
     mic_source: str | None = "default"
+    system_source: str | None = None    # "default" = the default sink's monitor; None = don't record PC audio
     preview: bool = True
     preview_size: tuple[int, int] | None = None   # None: the square demovid.layout prescribes
     hide_cursor: bool = False
@@ -134,6 +135,14 @@ class Session:
                 self.streams.append(mic_stream(self.dir, self.clock, self.mic_source))
             else:
                 self.log("no default audio source, skipping mic")
+        self.system_source = None
+        if o.system_source:
+            self.system_source = audio.monitor_source() if o.system_source == "default" else o.system_source
+            if self.system_source:
+                unsuspend_source(self.system_source)
+                self.streams.append(system_stream(self.dir, self.clock, self.system_source))
+            else:
+                self.log("default sink has no monitor source, skipping system audio")
 
         self.preview_rect: list[int] | None = None
         self._preview_placed = False
@@ -300,6 +309,8 @@ class Session:
             elif s.name == "mic":
                 entry.update(sample_rate=48000, channels=1, source=self.mic_source,
                              volume_pct=audio.source_volume_pct(self.mic_source) if self.mic_source else None)
+            elif s.name == "system":
+                entry.update(sample_rate=48000, channels=2, source=self.system_source)
             streams[s.name] = entry
         started = datetime.fromtimestamp(self.clock.epoch_s).astimezone()
         m = {

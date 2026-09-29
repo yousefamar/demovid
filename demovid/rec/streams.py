@@ -192,7 +192,7 @@ class _FfmpegMarker:
         return self.to_t(self.clock, float(m.group(1)))
 
 
-class _MicMarker(_FfmpegMarker):
+class _PulseMarker(_FfmpegMarker):
     """First the input dump's `start:`, then refined: every ashowinfo packet k implies
     start = pts_k - samples_before_k / rate; the median over the steady-state window wins."""
 
@@ -307,18 +307,29 @@ class Preview:
                 self.proc.kill()
 
 
-def mic_stream(out_dir: Path, clock: Clock, source: str, sample_rate: int = 48000) -> Stream:
+def pulse_stream(name: str, file: str, out_dir: Path, clock: Clock, source: str, channels: int,
+                 sample_rate: int = 48000) -> Stream:
     # pulse timestamps are latency-corrected wall clock (epoch seconds); -copyts keeps them for ashowinfo
     cmd = [
         "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info", "-copyts",
-        "-f", "pulse", "-channels", "1", "-sample_rate", str(sample_rate), "-fragment_size", "1920",
+        "-f", "pulse", "-channels", str(channels), "-sample_rate", str(sample_rate),
+        "-fragment_size", str(sample_rate // 50 * 2 * channels),   # 20 ms of s16
         "-i", source,
         "-af", "asettb=AVTB,ashowinfo",
-        "-c:a", "flac", str(out_dir / "mic.flac"),
+        "-c:a", "flac", str(out_dir / file),
     ]
-    stream = Stream("mic", "mic.flac", cmd, lambda line, t: None)
-    stream.marker = _MicMarker(clock, sample_rate, lambda: stream.spawned_t)
+    stream = Stream(name, file, cmd, lambda line, t: None)
+    stream.marker = _PulseMarker(clock, sample_rate, lambda: stream.spawned_t)
     return stream
+
+
+def mic_stream(out_dir: Path, clock: Clock, source: str, sample_rate: int = 48000) -> Stream:
+    return pulse_stream("mic", "mic.flac", out_dir, clock, source, channels=1, sample_rate=sample_rate)
+
+
+def system_stream(out_dir: Path, clock: Clock, source: str, sample_rate: int = 48000) -> Stream:
+    """What the PC plays, read from a sink's `.monitor` source: the far side of a call, app sounds."""
+    return pulse_stream("system", "system.flac", out_dir, clock, source, channels=2, sample_rate=sample_rate)
 
 
 def unsuspend_source(source: str) -> None:

@@ -14,10 +14,10 @@ KITTY = Path("~/.local/kitty.app/bin/kitty").expanduser()
 # Nerd Font (Font Awesome 4) glyphs as \u escapes on purpose: literal PUA characters get silently
 # stripped by some tooling, which then looks like a missing font glyph. Keep this file pure ASCII.
 ICONS = {"start": "\uf04b", "stop": "\uf04d", "pause": "\uf04c", "resume": "\uf04b", "cam": "\uf03d", "preview": "\uf030", "mic": "\uf130",
-         "keys": "\uf11c", "hide_cursor": "\uf245", "render": "\uf008", "upload": "\uf093",
+         "system_audio": "\uf028", "keys": "\uf11c", "hide_cursor": "\uf245", "render": "\uf008", "upload": "\uf093",
          "open": "\uf07b", "doctor": "\uf0f1", "settings": "\uf013", "back": "\uf053"}
-LABELS = {"cam": "Camera", "preview": "Preview window", "mic": "Microphone", "keys": "Keystrokes",
-          "hide_cursor": "Hide real cursor"}
+LABELS = {"cam": "Camera", "preview": "Preview window", "mic": "Microphone", "system_audio": "PC audio",
+          "keys": "Keystrokes", "hide_cursor": "Hide real cursor"}
 # render-settings glyphs: search, clock, mouse-pointer, video-camera, keyboard, closed-captioning,
 # forward, picture-o
 RENDER_ICONS = {"zoom": "\uf002", "zoom_hold": "\uf017", "cursor_scale": "\uf245", "camera": "\uf03d",
@@ -50,7 +50,7 @@ def entries() -> list[tuple[str, str]]:
         out.append((f"{ICONS['start']}  Start recording", "toggle-rec"))
     suffix = "  (next recording)" if st["recording"] else ""
     values = prefs.load()
-    for name in ("cam", "preview", "mic", "keys", "hide_cursor"):
+    for name in ("cam", "preview", "mic", "system_audio", "keys", "hide_cursor"):
         state = "on" if values[name] else "off"
         out.append((f"{ICONS[name]}  {LABELS[name]}: {state}{suffix}", f"toggle:{name}"))
     last = latest()

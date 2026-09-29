@@ -16,6 +16,24 @@ def default_source() -> str | None:
     return _pactl("get-default-source").strip() or None
 
 
+def default_sink() -> str | None:
+    return _pactl("get-default-sink").strip() or None
+
+
+def source_exists(source: str) -> bool:
+    names = [line.split("\t")[1] for line in _pactl("list", "sources", "short").splitlines() if "\t" in line]
+    return source in names
+
+
+def monitor_source(sink: str | None = None) -> str | None:
+    """The source that carries what `sink` (default: the default sink) plays; None if there is none."""
+    sink = sink or default_sink()
+    if not sink:
+        return None
+    mon = f"{sink}.monitor"
+    return mon if source_exists(mon) else None
+
+
 def source_volume_pct(source: str) -> int | None:
     m = re.search(r"(\d+)%", _pactl("get-source-volume", source))
     return int(m.group(1)) if m else None

@@ -5,11 +5,23 @@ import queue
 import re
 import subprocess
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 LOUDNORM_TARGET = "I=-14:TP=-1.5:LRA=11"
+# two voices levelled to -14 LUFS each can sum past 0 dBTP when they overlap; the limiter catches that
+MIX_LIMITER = "alimiter=limit=0.891:level=false"
+
+
+@dataclass(frozen=True)
+class AudioTrack:
+    """One recorded audio stream: `path` starts at `offset_s` on the recording clock."""
+    name: str
+    path: Path
+    offset_s: float
+    denoise: bool = False
 
 
 class FrameReader:
@@ -58,23 +70,25 @@ class FrameReader:
 
 class Encoder:
     def __init__(self, out: Path, width: int, height: int, fps: float, encoder: str, quality: int,
-                 audio: Path | None = None, audio_filter: str = "", audio_offset_s: float = 0.0,
-                 audio_duration_s: float | None = None, video_filter: str = ""):
+                 audio: list[tuple[Path, float, float | None]] | None = None, audio_filter: str = "",
+                 video_filter: str = ""):
+        """`audio` = (path, seek_s, duration_s) per input; `audio_filter` is a filter_complex graph reading
+        `[1:a]`..`[N:a]` and writing `[aout]` (see audio_chain)."""
         cmd = ["ffmpeg", "-v", "error", "-nostats", "-hide_banner", "-y",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", f"{fps:g}", "-i", "pipe:0"]
-        if audio is not None:
-            if audio_offset_s > 0:
-                cmd += ["-ss", f"{audio_offset_s:.6f}"]
-            cmd += ["-i", str(audio)]
-            if audio_duration_s is not None:
-                cmd += ["-t", f"{audio_duration_s:.6f}"]
+        for path, seek, duration in audio or []:
+            if seek > 0:
+                cmd += ["-ss", f"{seek:.6f}"]
+            if duration is not None:
+                cmd += ["-t", f"{duration:.6f}"]
+            cmd += ["-i", str(path)]
         cmd += ["-map", "0:v:0"]
         if video_filter:
             cmd += ["-vf", video_filter]
-        if audio is not None:
-            # apad + -shortest: the video always decides the length; a mic track that stopped early gets silence
-            cmd += ["-map", "1:a:0", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
-                    "-af", ",".join(filter(None, [audio_filter, "apad"]))]
+        if audio:
+            # apad (inside the graph) + -shortest: the video always decides the length; an audio track that
+            # stopped early gets silence
+            cmd += ["-filter_complex", audio_filter, "-map", "[aout]", "-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
         if encoder == "h264_nvenc":
             cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
         else:
@@ -185,54 +199,85 @@ def level_track(mic: Path, win_s: float = 0.1, rate: int = 48000) -> list[float]
     return levels
 
 
-def silences(mic: Path, stream_offset_s: float, min_s: float = 0.6) -> list[tuple[float, float]]:
-    """Stretches where nobody is talking, on the recording clock. Threshold adapts to the recording."""
-    from demovid.render.timing import quiet_intervals, speech_threshold
+def silences(tracks: list[AudioTrack], min_s: float = 0.6) -> list[tuple[float, float]]:
+    """Stretches where nobody is talking on ANY track, on the recording clock. Each track's threshold
+    adapts to its own floor; a track whose floor cannot be trusted only counts digital silence as quiet."""
+    from demovid.render.timing import intersect, quiet_intervals, speech_threshold
 
     win_s = 0.1
-    levels = level_track(mic, win_s)
-    thresh = speech_threshold(levels)
-    if thresh is None:
-        return []
-    return [(a + stream_offset_s, b + stream_offset_s) for a, b in quiet_intervals(levels, win_s, thresh, min_s)]
+    quiet: list[tuple[float, float]] | None = None
+    for tr in tracks:
+        levels = level_track(tr.path, win_s)
+        thresh = speech_threshold(levels)
+        if thresh is None:
+            thresh = -100.0
+        mine = [(a + tr.offset_s, b + tr.offset_s) for a, b in quiet_intervals(levels, win_s, thresh, min_s)]
+        quiet = mine if quiet is None else intersect(quiet, mine)
+    return quiet or []
 
 
-def audio_chain(mic: Path, stream_offset_s: float, t_from: float, t_to: float | None, denoise: bool,
-                keep: list[tuple[float, float]] | None = None) -> tuple[str, float, float | None]:
-    """Two-pass loudnorm (+ optional afftdn). Returns (filter, input_seek_s, input_duration_s).
-
-    The mic stream starts at stream_offset_s on the recording clock; the render starts at t_from.
-    If the render starts before the mic does, the gap is padded with silence via adelay.
-    `keep` = source-time intervals to keep (idle speed-up drops the rest); filter time is t - t_from.
-    """
+def _track_pre(track: AudioTrack, t_from: float, keep: list[tuple[float, float]] | None) -> tuple[list[str], float]:
+    """Filters that put `track` on the render's clock (filter time = t - t_from), plus the input seek."""
     from demovid.render.timing import aselect_expr
 
-    seek = max(t_from - stream_offset_s, 0.0)
-    delay_ms = max(stream_offset_s - t_from, 0.0) * 1000
-    duration = (t_to - t_from) if t_to is not None else None
+    seek = max(t_from - track.offset_s, 0.0)
+    delay_ms = max(track.offset_s - t_from, 0.0) * 1000
     pre = []
     if delay_ms > 0.5:
         pre.append(f"adelay={delay_ms:.0f}:all=1")
     if keep is not None:
         pre.append(f"aselect='{aselect_expr(keep, t_from)}',asetpts=N/SR/TB")
-    if denoise:
+    if track.denoise:
         pre.append("afftdn=nr=10:nf=-40:tn=1")
+    return pre, seek
+
+
+def _loudnorm(track: AudioTrack, pre: list[str], seek: float, duration: float | None) -> str:
+    """Two-pass loudnorm: measure the track as it will be heard (after `pre`), then apply linearly."""
     measure = ",".join(pre + [f"loudnorm={LOUDNORM_TARGET}:print_format=json"])
     cmd = ["ffmpeg", "-v", "info", "-nostats", "-hide_banner"]
     if seek > 0:
         cmd += ["-ss", f"{seek:.6f}"]
-    cmd += ["-i", str(mic)]
     if duration is not None:
         cmd += ["-t", f"{duration:.6f}"]
-    cmd += ["-af", measure, "-f", "null", "-"]
+    cmd += ["-i", str(track.path), "-af", measure, "-f", "null", "-"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr, re.S)
     if not m:
-        print("[audio] loudnorm measurement failed; falling back to single-pass")
-        return ",".join(pre + [f"loudnorm={LOUDNORM_TARGET}"]), seek, duration
+        print(f"[audio] {track.name}: loudnorm measurement failed; falling back to single-pass")
+        return f"loudnorm={LOUDNORM_TARGET}"
     stats = json.loads(m.group(0))
-    second = (f"loudnorm={LOUDNORM_TARGET}:measured_I={stats['input_i']}:measured_TP={stats['input_tp']}"
-              f":measured_LRA={stats['input_lra']}:measured_thresh={stats['input_thresh']}"
-              f":offset={stats['target_offset']}:linear=true")
-    print(f"[audio] measured {float(stats['input_i']):.1f} LUFS, peak {float(stats['input_tp']):.1f} dBTP -> -14 LUFS")
-    return ",".join(pre + [second]), seek, duration
+    print(f"[audio] {track.name}: measured {float(stats['input_i']):.1f} LUFS, peak {float(stats['input_tp']):.1f} dBTP"
+          f" -> -14 LUFS")
+    return (f"loudnorm={LOUDNORM_TARGET}:measured_I={stats['input_i']}:measured_TP={stats['input_tp']}"
+            f":measured_LRA={stats['input_lra']}:measured_thresh={stats['input_thresh']}"
+            f":offset={stats['target_offset']}:linear=true")
+
+
+def audio_chain(tracks: list[AudioTrack], t_from: float, t_to: float | None,
+                keep: list[tuple[float, float]] | None = None) -> tuple[str, list[tuple[Path, float, float | None]]]:
+    """The encoder's audio: every track levelled to -14 LUFS (two-pass loudnorm, afftdn first where
+    `denoise`), then, with more than one, summed as stereo and limited. Returns the filter_complex graph
+    (inputs `[1:a]`.., output `[aout]`) and the (path, seek, duration) per input, in order.
+
+    Each track starts at its own offset_s on the recording clock; the render starts at t_from. A track
+    that starts after t_from is padded with silence via adelay, one that started before is seeked into.
+    `keep` = source-time intervals to keep (idle speed-up drops the rest); filter time is t - t_from.
+    """
+    duration = (t_to - t_from) if t_to is not None else None
+    inputs: list[tuple[Path, float, float | None]] = []
+    chains: list[str] = []
+    for i, tr in enumerate(tracks, start=1):
+        pre, seek = _track_pre(tr, t_from, keep)
+        inputs.append((tr.path, seek, duration))
+        chain = pre + [_loudnorm(tr, pre, seek, duration)]
+        if len(tracks) > 1:
+            # loudnorm outputs 192 kHz; bring the tracks to one rate and layout before summing them
+            chain += ["aresample=48000", "aformat=channel_layouts=stereo"]
+        chains.append(f"[{i}:a]{','.join(chain)}[a{i}]")
+    if len(tracks) == 1:
+        graph = ";".join(chains).removesuffix("[a1]") + ",apad[aout]"
+    else:
+        labels = "".join(f"[a{i}]" for i in range(1, len(tracks) + 1))
+        graph = ";".join(chains) + f";{labels}amix=inputs={len(tracks)}:normalize=0:duration=longest,{MIX_LIMITER},apad[aout]"
+    return graph, inputs

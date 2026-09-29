@@ -39,6 +39,11 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mic", dest="mic", action="store_true", default=None)
     p.add_argument("--no-mic", dest="mic", action="store_false")
     p.add_argument("--mic-source", default="default", help="PulseAudio/PipeWire source name")
+    p.add_argument("--system-audio", dest="system_audio", action="store_true", default=None,
+                   help="also record what the PC plays (the far side of a call) to system.flac")
+    p.add_argument("--no-system-audio", dest="system_audio", action="store_false")
+    p.add_argument("--system-source", default="default",
+                   help="monitor source to read PC audio from (default: the default sink's .monitor)")
     p.add_argument("--preview", dest="preview", action="store_true", default=None,
                    help="show the webcam preview window")
     p.add_argument("--no-preview", dest="preview", action="store_false", help="don't show the webcam preview window")
@@ -62,6 +67,7 @@ def _options(ns: argparse.Namespace):
     saved = prefs.load()
     cam = saved["cam"] if ns.cam is None else ns.cam
     mic = saved["mic"] if ns.mic is None else ns.mic
+    system_audio = saved["system_audio"] if ns.system_audio is None else ns.system_audio
     preview = saved["preview"] if ns.preview is None else ns.preview
     keys = saved["keys"] if ns.keys is None else ns.keys
     hide_cursor = saved["hide_cursor"] if ns.hide_cursor is None else ns.hide_cursor
@@ -69,6 +75,7 @@ def _options(ns: argparse.Namespace):
         out_root=ns.out_root, output=ns.output, fps=ns.fps, cq=ns.cq,
         cam_device=ns.cam_device if cam else None, cam_size=ns.cam_size, cam_fps=ns.cam_fps,
         mic_source=ns.mic_source if mic else None,
+        system_source=ns.system_source if system_audio else None,
         preview=preview and cam, preview_size=ns.preview_size,
         hide_cursor=hide_cursor, log_keys=keys, notify=not ns.no_notify,
     )

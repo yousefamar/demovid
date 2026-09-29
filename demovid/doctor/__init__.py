@@ -262,6 +262,12 @@ def checks(out_root: Path) -> list[tuple[str, str, str]]:
         res.append((WARN if warn else OK, "mic", warn or f"{src} at {vol}%"))
     else:
         res.append((WARN, "mic", "no default source"))
+    sink = audio.default_sink()
+    mon = audio.monitor_source(sink)
+    if mon:
+        res.append((OK, "system audio", f"{mon} (--system-audio / the menu's PC audio)"))
+    else:
+        res.append((WARN, "system audio", f"no monitor source for sink {sink!r}: PC audio cannot be recorded"))
 
     # `--captions` only: sway-launched renders never read ~/.zshrc, so report which source has the key
     from demovid.render.captions import KEY_FILE, openai_key

@@ -9,7 +9,7 @@ Trunk-based like Console. No feature branches, no worktree branches that outlive
 **Record raw + an event log; render afterwards.** Live effects are a dead end (bake decisions in, and the compositor gives a live client nothing to work with).
 
 ```
-demovid rec      → ~/Videos/demovid/<ts>/{manifest.json, screen.mp4, cam.mp4, mic.flac, events.jsonl}
+demovid rec      → ~/Videos/demovid/<ts>/{manifest.json, screen.mp4, cam.mp4, mic.flac, [system.flac], events.jsonl}
 demovid render   → events → zoom plan (pure fn) → composite → NVENC mp4
 demovid upload   → YouTube unlisted (Data API, resumable) → URL on the clipboard (wl-copy)
 ```
@@ -86,11 +86,25 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   no compositor reports the caret; the click that focused the field is the best proxy. The real fix is an
   AT-SPI caret listener (`org.a11y.Bus` is up and Brave runs with `--force-renderer-accessibility`), but
   `python3-pyatspi` is not installed (apt, needs sudo) — a follow-up, not done.
-- **`demovid/prefs.py`**: sticky `rec` defaults (`cam`, `preview`, `mic`, `keys`, `hide_cursor`) in
+- **PC audio / meeting recording** (`rec --system-audio`, menu toggle `PC audio`, pref `system_audio`, default OFF —
+  a demo does not want notification dings): a third pulse stream reads the default sink's `.monitor` source
+  (`audio.monitor_source()`; `--system-source X.monitor` to name another, e.g. a headset) into `system.flac`,
+  stereo, same `_PulseMarker` clock as the mic. `render` builds ONE filter_complex for all tracks
+  (`media.audio_chain` → `[aout]`): per track adelay/aselect → afftdn (mic only) → two-pass loudnorm →
+  48 kHz stereo, then `amix=normalize=0` + `alimiter=0.891` (two −14 LUFS voices overlapping would clip).
+  Captions transcribe the tracks summed on the mic's clock (`captions.mix_graph`), and `media.silences()` only
+  calls a stretch quiet when every track is — a track whose floor cannot be estimated (a call app sends
+  digital silence while the far side is muted) counts only ≤ −100 dBFS as quiet. Verified 2026-09-29 with a
+  `module-null-sink` fed a 3 s tone: tone length exact, onset 91 ms after `paplay` spawned (its startup),
+  in the render at the right output time, mix peak 0.83. Test that way — never play into his real sink.
+  The monitor of a sink is the sink's OWN output: with speakers rather than headphones, the mic also hears
+  the far side a few ms later (slight echo in the mix); headphones avoid it.
+- **`demovid/prefs.py`**: sticky `rec` defaults (`cam`, `preview`, `mic`, `system_audio`, `keys`, `hide_cursor`) in
   `~/.config/demovid/prefs.json`, which the menu toggles. A pref is only a DEFAULT — `rec` takes both
   polarities (`--cam`/`--no-cam`, `--keys`/`--no-keys`, `--hide-cursor`/`--show-cursor`, all defaulting to
-  `None`) so an explicit flag always wins. The bar's tooltip lists whatever is off, so a muted mic cannot
-  surprise him mid-demo.
+  `None`) so an explicit flag always wins. The bar's tooltip lists whatever is not at its default (`off:` the
+  default-on prefs that are off, `on:` `hide_cursor`/`system_audio` when on), so a muted mic or a PC-audio
+  capture left on cannot surprise him mid-demo.
 - **Render overlays** live in `render/cursor.py` (`CursorTrack` positions, `ShapeTrack` + `draw_shape` for compositor-captured cursor images, synthetic arrow fallback) and `render/chips.py` (keystroke pills, PIL text on DejaVu Sans Bold — the only local font with ⌘ ⇧ ⌫ ⏎). `--synthetic-cursor` forces the stylised arrow; `--no-chips` / `--all-keys` / `--chip-hold` tune chips. Real-shape rendering is testable without a recording: `tests/xcursor.py` reads theme cursor files into the same BGRA the protocol delivers.
 - **`FORMAT.md` is the contract** between `rec`, `import-screenix` and `render` (manifest.json + events.jsonl v1). Change it there first; `render` must keep reading every version ever written.
 - **Subcommands are packages** `demovid/<name>/__init__.py` exposing `add_args(parser)` + `main(ns) -> int`; `cli.py` discovers them from `SUBCOMMANDS` and is never edited by feature work. Heavy imports (cv2, av, pywayland) stay inside `main()`. `uv sync --group dev`, `uv run demovid …`, `uv run pytest`.

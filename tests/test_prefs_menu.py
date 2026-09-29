@@ -19,7 +19,8 @@ def rec_ns(argv: list[str]) -> argparse.Namespace:
 
 
 def test_defaults_when_no_file():
-    assert prefs.load() == {"cam": True, "preview": True, "mic": True, "keys": True, "hide_cursor": False}
+    assert prefs.load() == {"cam": True, "preview": True, "mic": True, "system_audio": False, "keys": True,
+                            "hide_cursor": False}
 
 
 def test_toggle_round_trips_to_disk():
@@ -77,7 +78,7 @@ def test_menu_entries_are_ascii_safe_and_have_actions(monkeypatch):
     assert actions[0] == "toggle-rec"
     assert "Start recording" in labels[0]
     assert [a for a in actions if a.startswith("toggle:")] == [
-        "toggle:cam", "toggle:preview", "toggle:mic", "toggle:keys", "toggle:hide_cursor"]
+        "toggle:cam", "toggle:preview", "toggle:mic", "toggle:system_audio", "toggle:keys", "toggle:hide_cursor"]
     assert actions[-1] == "doctor"
     assert len(set(labels)) == len(labels)          # `--pick` matches on the label, so no duplicates
     for label in labels:
@@ -197,3 +198,12 @@ def test_pick_reaches_a_settings_entry(monkeypatch):
     ns = argparse.Namespace(print=False, pick="cycle:captions", lines=11, click=False)
     assert menu.main(ns) == 0
     assert prefs.render_load()["captions"] is True
+
+
+def test_system_audio_is_off_by_default_and_flags_beat_the_pref():
+    assert _options(rec_ns([])).system_source is None
+    assert _options(rec_ns(["--system-audio"])).system_source == "default"
+    prefs.set_value("system_audio", True)
+    assert _options(rec_ns([])).system_source == "default"
+    assert _options(rec_ns(["--no-system-audio"])).system_source is None
+    assert _options(rec_ns(["--system-source", "demovid_test.monitor"])).system_source == "demovid_test.monitor"

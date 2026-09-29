@@ -8,6 +8,7 @@
   screen.mp4     full output, NVENC h264, 60 fps
   cam.mp4        webcam, NVENC h264, 720p30 or 1080p30 (absent if no camera)
   mic.flac       mono, 48 kHz (absent if no mic)
+  system.flac    what the PC played (stereo, 48 kHz) — absent unless `rec --system-audio` / the menu's PC audio
   cursors/       <id>.png per distinct cursor image (absent unless the cursor session captured shapes)
   events.jsonl   one JSON object per line, ascending t (except `stream` lines, appended at stop)
 ```
@@ -34,7 +35,9 @@ cached whisper transcript, keyed on `mic.flac`'s size+mtime so re-renders never 
     "screen": {"file": "screen.mp4", "fps": 60, "offset_s": 0.31},
     "cam":    {"file": "cam.mp4", "fps": 30, "width": 1280, "height": 720, "offset_s": 0.42,
                "preview_rect": [1520, 800, 384, 216]},
-    "mic":    {"file": "mic.flac", "sample_rate": 48000, "channels": 1, "offset_s": 0.05}
+    "mic":    {"file": "mic.flac", "sample_rate": 48000, "channels": 1, "offset_s": 0.05},
+    "system": {"file": "system.flac", "sample_rate": 48000, "channels": 2, "offset_s": 0.06,
+               "source": "alsa_output.pci-0000_05_00.1.hdmi-stereo.monitor"}
   },
   "cursor": {"theme": "Adwaita", "size": 24, "hidden_during_rec": true, "shapes_dir": "cursors"},
   "cursor_source": "ext-image-copy-capture",
@@ -50,6 +53,7 @@ cached whisper transcript, keyed on `mic.flac`'s size+mtime so re-renders never 
 - Cursor positions are emitted per output commit, so they are dense (~48/s measured) while the pointer moves and absent while it is still — gaps in the `cursor` stream mean "did not move", not "not recorded".
 - `cursor_source` is one of `ext-image-copy-capture`, `layer-shell-anchor`, `evdev-dead-reckoning`, `screenix`, `none`. `render` uses it to decide how much to trust `cursor` events (e.g. dead-reckoning may need drift correction).
 - `source` is `demovid` or `screenix` (imported). Imported manifests fill what they can; missing streams are omitted, not nulled.
+- `streams.system` is the PC's own audio (the far side of a call, app sounds), read from a sink's `.monitor` source — the default sink's unless `--system-source` named another. `render` levels every audio track to −14 LUFS separately (only the mic is denoised), sums them as stereo and limits the sum; captions transcribe the sum on the mic's clock, and the idle speed-up only treats a stretch as quiet when EVERY track is quiet, so the far side talking is never fast-forwarded.
 - `rec` also writes informational extras that `render` may ignore: `streams.mic.source` / `volume_pct` (the PipeWire source and its level at stop — decision 4 says warn, never force), `input_devices` (evdev node names read), `offset_s: null` when a stream never reported a first frame.
 
 ## events.jsonl

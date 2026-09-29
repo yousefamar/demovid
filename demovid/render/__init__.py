@@ -125,7 +125,7 @@ def main(ns: argparse.Namespace) -> int:
     from demovid.render.chips import chips_from_events
     from demovid.render.compositor import Compositor, Look
     from demovid.render.cursor import CursorRefiner, CursorTrack, ShapeTrack
-    from demovid.render.media import (AsyncEncoder, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration,
+    from demovid.render.media import (AsyncEncoder, AudioTrack, Encoder, FrameReader, Prefetcher, audio_chain, probe_duration,
                                       silences)
     from demovid.render.planner import Keyframe, PlanConfig, plan
     from demovid.render.timing import (IdleConfig, TimeMap, compress, cuts, idle_intervals, parse_span_list,
@@ -203,15 +203,18 @@ def main(ns: argparse.Namespace) -> int:
     if ns.plan_json:
         Path(ns.plan_json).write_text(json.dumps([k.as_dict() for k in keyframes], indent=1))
 
-    audio = streams.get("mic") if not ns.no_audio else None
-    mic_offset = float(audio.get("offset_s") or 0.0) if audio else 0.0
+    # mic first: captions and speech detection are aligned to tracks[0]'s clock
+    tracks = [AudioTrack(name, rec / st["file"], float(st.get("offset_s") or 0.0), denoise=name == "mic" and not ns.no_denoise)
+              for name in ("mic", "system") if (st := streams.get(name))] if not ns.no_audio else []
+    audio = bool(tracks)
+    audio_offset = tracks[0].offset_s if tracks else 0.0
 
     segments = cuts(paused)
     if paused:
         print(f"[pause] {len(paused)} paused span(s) cut, {sum(b - a for a, b in paused):.1f}s")
     if ns.idle_speed and ns.idle_speed > 1.0 and not ns.still:
         icfg = IdleConfig(min_idle_s=ns.idle_min, speed=ns.idle_speed, max_out_s=ns.idle_max)
-        quiet = None if (ns.idle_ignore_speech or not audio) else silences(rec / audio["file"], mic_offset)
+        quiet = None if (ns.idle_ignore_speech or not audio) else silences(tracks)
         idle = subtract(idle_intervals(events, t_from, t_to, icfg, quiet), paused)
         segments += compress(idle, icfg)
         print(f"[idle] {len(idle)} stretches sped up"
@@ -300,24 +303,24 @@ def main(ns: argparse.Namespace) -> int:
     audio_args = {}
     if audio:
         keep = tm.audio_keep() if tm.segments else None
-        filt, seek, dur = audio_chain(rec / audio["file"], mic_offset, t_from, t_to, not ns.no_denoise, keep)
-        audio_args = {"audio": rec / audio["file"], "audio_filter": filt, "audio_offset_s": seek, "audio_duration_s": dur}
+        graph, inputs = audio_chain(tracks, t_from, t_to, keep)
+        audio_args = {"audio": inputs, "audio_filter": graph}
 
     video_filter = ""
     if ns.captions:
         from demovid.render.captions import subtitles_filter, to_srt, transcribe
         if not audio:
-            raise SystemExit("--captions needs the mic track (drop --no-audio)")
-        segments = transcribe(rec / audio["file"], rec / "captions.json", ns.captions_lang)
+            raise SystemExit("--captions needs an audio track (drop --no-audio)")
+        segments = transcribe(tracks, rec / "captions.json", ns.captions_lang)
         srt_path = out.with_suffix(".srt")
-        srt_path.write_text(to_srt(segments, mic_offset, tm))
+        srt_path.write_text(to_srt(segments, audio_offset, tm))
         side = (pip_side_out / out_w + 0.03) if cam else 0.06
         video_filter = subtitles_filter(srt_path, out_h, above_chips=bool(chips), side_margin_frac=side)
         print(f"[captions] {len(segments)} segments -> {srt_path}")
 
     print(f"[render] {rec.name}: {t_from:.2f}..{t_to:.2f}s -> {tm.duration:.1f}s, {out_w}x{out_h}@{fps:g}, {n_frames} frames, "
           f"{len(keyframes)} keyframes, cursor={'yes' if track.present and look.cursor else 'no'}, "
-          f"pip={look.pip_mode if cam else 'no'}, audio={'yes' if audio else 'no'}, "
+          f"pip={look.pip_mode if cam else 'no'}, audio={'+'.join(t.name for t in tracks) or 'no'}, "
           f"shapes={'yes' if shapes.present and look.cursor_real else 'no'}, chips={len(chips)}, "
           f"pad={look.pad:g} -> {out}", flush=True)
     reader = Prefetcher(FrameReader(screen_path, fps, t_from - screen_offset, t_to - t_from))

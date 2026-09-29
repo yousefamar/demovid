@@ -18,15 +18,15 @@ prefs="${XDG_CONFIG_HOME:-$HOME/.config}/demovid/prefs.json"
 
 # idle: a dim camera glyph, so there is always a button to click
 idle() {
-  off=$(jq -r '[to_entries[]
-      | select((.key == "hide_cursor" and .value == true) or (.key != "hide_cursor" and .value == false))
+  # anything not at its default: default-on prefs that are off, default-off ones that are on
+  off=$(jq -r '[to_entries[] | select((.key | IN("hide_cursor", "system_audio") | not) and .value == false)
       | .key] | join(", ")' "$prefs" 2>/dev/null)
-  if [ -n "$off" ] && [ "$off" != "null" ]; then
-    printf '{"text":"%s","class":"idle","tooltip":"demovid: idle, off: %s\\nclick for menu"}\n' \
-      "$ICON_IDLE" "$off"
-  else
-    printf '{"text":"%s","class":"idle","tooltip":"demovid: idle\\nclick for menu"}\n' "$ICON_IDLE"
-  fi
+  on=$(jq -r '[to_entries[] | select((.key | IN("hide_cursor", "system_audio")) and .value == true)
+      | .key] | join(", ")' "$prefs" 2>/dev/null)
+  tip="demovid: idle"
+  [ -n "$off" ] && [ "$off" != "null" ] && tip="$tip, off: $off"
+  [ -n "$on" ] && [ "$on" != "null" ] && tip="$tip, on: $on"
+  printf '{"text":"%s","class":"idle","tooltip":"%s\\nclick for menu"}\n' "$ICON_IDLE" "$tip"
   exit 0
 }
 

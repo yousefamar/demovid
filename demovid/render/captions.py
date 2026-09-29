@@ -1,4 +1,4 @@
-"""Captions: whisper-1 transcription of mic.flac (cached in the recording dir) -> SRT in output time."""
+"""Captions: whisper-1 transcription of the audio tracks (cached in the recording dir) -> SRT in output time."""
 
 import json
 import os
@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from demovid import CONFIG_DIR
+from demovid.render.media import AudioTrack
 from demovid.render.timing import TimeMap
 
 API = "https://api.openai.com/v1/audio/transcriptions"
@@ -32,10 +33,13 @@ def openai_key() -> str | None:
         return None
 
 
-def transcribe(mic: Path, cache: Path, language: str | None = None) -> list[dict]:
-    """Segments [{start, end, text}] on the mic's own clock. Cached at `cache` keyed by the flac's size+mtime."""
-    st = mic.stat()
-    key = {"size": st.st_size, "mtime": int(st.st_mtime), "model": "whisper-1", "language": language}
+def transcribe(tracks: list[AudioTrack], cache: Path, language: str | None = None) -> list[dict]:
+    """Segments [{start, end, text}] on tracks[0]'s own clock (the others are shifted onto it and summed,
+    so a call's far side is captioned too). Cached at `cache` keyed by the files' size+mtime."""
+    stats = [tr.path.stat() for tr in tracks]
+    key = {"size": stats[0].st_size, "mtime": int(stats[0].st_mtime), "model": "whisper-1", "language": language}
+    if len(tracks) > 1:
+        key["tracks"] = [[tr.name, st.st_size, int(st.st_mtime)] for tr, st in zip(tracks, stats)]
     if cache.exists():
         try:
             data = json.loads(cache.read_text())
@@ -49,11 +53,16 @@ def transcribe(mic: Path, cache: Path, language: str | None = None) -> list[dict
                          f"(the menu's render runs from sway, which never reads ~/.zshrc)")
     with tempfile.TemporaryDirectory() as td:
         # mono 16 kHz mp3 keeps an hour under whisper's 25 MB limit; flac would not
-        mp3 = Path(td) / "mic.mp3"
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(mic), "-ac", "1", "-ar", "16000",
-                        "-c:a", "libmp3lame", "-b:a", "48k", str(mp3)], check=True)
+        mp3 = Path(td) / "audio.mp3"
+        cmd = ["ffmpeg", "-v", "error", "-y"]
+        for tr in tracks:
+            cmd += ["-i", str(tr.path)]
+        if len(tracks) > 1:
+            cmd += ["-filter_complex", mix_graph(tracks), "-map", "[aout]"]
+        cmd += ["-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k", str(mp3)]
+        subprocess.run(cmd, check=True)
         if mp3.stat().st_size > MAX_UPLOAD_BYTES:
-            raise SystemExit(f"mic track is {mp3.stat().st_size / 1e6:.0f} MB compressed; whisper takes 25 MB (~70 min)")
+            raise SystemExit(f"audio is {mp3.stat().st_size / 1e6:.0f} MB compressed; whisper takes 25 MB (~70 min)")
         fields = {"model": "whisper-1", "response_format": "verbose_json", "timestamp_granularities[]": "segment"}
         if language:
             fields["language"] = language
@@ -67,6 +76,20 @@ def transcribe(mic: Path, cache: Path, language: str | None = None) -> list[dict
     cache.write_text(json.dumps({"key": key, "language": result.get("language"), "text": result.get("text", ""),
                                  "segments": segments}, indent=1, ensure_ascii=False))
     return segments
+
+
+def mix_graph(tracks: list[AudioTrack]) -> str:
+    """Sum the tracks on tracks[0]'s clock: a later-starting track is delayed, an earlier one trimmed."""
+    parts = ["[0:a]aformat=channel_layouts=stereo[a0]"]
+    for i, tr in enumerate(tracks[1:], start=1):
+        shift = tr.offset_s - tracks[0].offset_s
+        if shift >= 0:
+            align = f"adelay={shift * 1000:.0f}:all=1"
+        else:
+            align = f"atrim=start={-shift:.6f},asetpts=PTS-STARTPTS"
+        parts.append(f"[{i}:a]{align},aformat=channel_layouts=stereo[a{i}]")
+    labels = "".join(f"[a{i}]" for i in range(len(tracks)))
+    return ";".join(parts) + f";{labels}amix=inputs={len(tracks)}:normalize=0:duration=longest[aout]"
 
 
 def multipart(fields: dict, file_field: str, filename: str, data: bytes, mime: str) -> tuple[bytes, str]:
