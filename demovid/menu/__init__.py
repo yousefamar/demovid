@@ -48,7 +48,7 @@ def entries() -> list[tuple[str, str]]:
         out.append((f"{ICONS['stop']}  Stop recording", "toggle-rec"))
     else:
         out.append((f"{ICONS['start']}  Start recording", "toggle-rec"))
-        out.append((f"{ICONS['mic']}  Start audio recording (mic + PC)", "start-audio"))
+        out.append((f"{ICONS['mic']}  Start audio recording", "start-audio"))
     suffix = "  (next recording)" if st["recording"] else ""
     values = prefs.load()
     for name in ("cam", "preview", "mic", "system_audio", "keys", "hide_cursor"):

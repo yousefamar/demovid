@@ -100,7 +100,7 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   in the render at the right output time, mix peak 0.83. Test that way — never play into his real sink.
   The monitor of a sink is the sink's OWN output: with speakers rather than headphones, the mic also hears
   the far side a few ms later (slight echo in the mix); headphones avoid it.
-- **Audio-only recording** (`rec --audio-only`, menu "Start audio recording (mic + PC)", asked for 2026-09-29 —
+- **Audio-only recording** (`rec --audio-only`, menu "Start audio recording", asked for 2026-09-29 —
   "how do I do recording only?"): `RecOptions.audio_only` skips the screen, cam, cursor session, evdev and
   Sway loggers; PC audio defaults ON in this mode unless `--no-system-audio`; the mic is `streams[0]` and
   plays the "primary stream" role (its death aborts). State/`rec --status` carry `audio_only`, the bar shows

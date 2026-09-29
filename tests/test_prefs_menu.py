@@ -220,7 +220,7 @@ def test_audio_only_is_the_meeting_mode():
 def test_menu_offers_an_audio_recording_when_idle(monkeypatch):
     monkeypatch.setattr(menu, "latest", lambda: None)
     items = menu.entries()
-    assert items[1][1] == "start-audio" and "mic + PC" in items[1][0]
+    assert items[1] == (f"{menu.ICONS['mic']}  Start audio recording", "start-audio")
     monkeypatch.setattr("demovid.rec.status",
                         lambda: {"recording": True, "paused": False, "dir": "/x", "pid": 1, "elapsed_s": 5.0})
     assert "start-audio" not in [a for _, a in menu.entries()]
