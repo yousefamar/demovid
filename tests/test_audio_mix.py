@@ -1,5 +1,7 @@
 """The render's audio with one or two tracks (mic + PC audio): graph shape, alignment, speech detection."""
 
+import json
+import subprocess
 from pathlib import Path
 
 from demovid.render import captions, media
@@ -31,6 +33,21 @@ def test_two_tracks_are_levelled_summed_and_limited(monkeypatch):
     assert mic_chain.endswith("LN(mic),aresample=48000,aformat=channel_layouts=stereo[a1]")
     assert sys_chain.endswith("LN(system),aresample=48000,aformat=channel_layouts=stereo[a2]")
     assert mix == f"[a1][a2]amix=inputs=2:normalize=0:duration=longest,{media.MIX_LIMITER},apad[aout]"
+
+
+def test_a_silent_track_is_passed_through_instead_of_normalised(monkeypatch):
+    def fake_run(cmd, **kw):
+        measured = {"input_i": "-inf", "input_tp": "-inf", "input_lra": "0.00",
+                    "input_thresh": "-70.00", "target_offset": "inf"} if str(SYS.path) in cmd else \
+                   {"input_i": "-25.61", "input_tp": "-4.13", "input_lra": "3.70",
+                    "input_thresh": "-37.24", "target_offset": "9.47"}
+        return subprocess.CompletedProcess(cmd, 0, "", f"[Parsed_loudnorm_0 @ 0x0] \n{json.dumps(measured)}\n")
+    monkeypatch.setattr(media.subprocess, "run", fake_run)
+    graph, _ = audio_chain([MIC, SYS], t_from=0.0, t_to=10.0)
+    mic_chain, sys_chain, _ = graph.split(";")
+    assert "loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=-25.61" in mic_chain
+    assert "loudnorm" not in sys_chain                    # -inf would be rejected as measured_I
+    assert sys_chain.endswith("anull,aresample=48000,aformat=channel_layouts=stereo[a2]")
 
 
 def test_encoder_command_takes_n_audio_inputs(monkeypatch):

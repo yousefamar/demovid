@@ -1,6 +1,7 @@
 """ffmpeg subprocess plumbing: raw-frame readers, the encoder, and the audio filter chain."""
 
 import json
+import math
 import queue
 import re
 import subprocess
@@ -247,6 +248,10 @@ def _loudnorm(track: AudioTrack, pre: list[str], seek: float, duration: float | 
         print(f"[audio] {track.name}: loudnorm measurement failed; falling back to single-pass")
         return f"loudnorm={LOUDNORM_TARGET}"
     stats = json.loads(m.group(0))
+    # a track nothing played into measures -inf/inf, which loudnorm's own measured_* reject ([-99, 0])
+    if not all(math.isfinite(float(stats[k])) for k in ("input_i", "input_tp", "target_offset")):
+        print(f"[audio] {track.name}: silent, nothing to normalise")
+        return "anull"
     print(f"[audio] {track.name}: measured {float(stats['input_i']):.1f} LUFS, peak {float(stats['input_tp']):.1f} dBTP"
           f" -> -14 LUFS")
     return (f"loudnorm={LOUDNORM_TARGET}:measured_I={stats['input_i']}:measured_TP={stats['input_tp']}"
