@@ -93,6 +93,12 @@ All artefacts share one monotonic start clock from `manifest.json`; every event 
   stereo, same `_PulseMarker` clock as the mic. `render` builds ONE filter_complex for all tracks
   (`media.audio_chain` → `[aout]`): per track adelay/aselect → afftdn (mic only) → two-pass loudnorm →
   48 kHz stereo, then `amix=normalize=0` + `alimiter=0.891` (two −14 LUFS voices overlapping would clip).
+  **A track nothing played into measures `input_i: -inf` / `target_offset: inf`, and loudnorm REJECTS its own
+  measurements back (`measured_I` must be in [−99, 0])** — the whole filter_complex then fails to parse, ffmpeg
+  dies, and the frame loop hits `BrokenPipeError` on the dead encoder. So every `--system-audio` recording made
+  with nothing playing was unrenderable until 91c031d; `_loudnorm()` now checks the measurement is finite and
+  emits `anull` when it is not (a silent track has no loudness to correct, and still joins the amix so the
+  `audio=mic+system` log line stays honest). Found 2026-10-05; measured cost of carrying the silent track: 0.2 dB.
   Captions transcribe the tracks summed on the mic's clock (`captions.mix_graph`), and `media.silences()` only
   calls a stretch quiet when every track is — a track whose floor cannot be estimated (a call app sends
   digital silence while the far side is muted) counts only ≤ −100 dBFS as quiet. Verified 2026-09-29 with a
