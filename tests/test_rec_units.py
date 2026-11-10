@@ -133,3 +133,78 @@ def test_monitor_source_needs_a_listed_source(monkeypatch):
     assert audio.monitor_source("alsa_output.other") is None
     monkeypatch.setattr(audio, "_pactl", lambda *a: "")
     assert audio.monitor_source() is None
+
+
+# --- one recorder at a time (5 Nov 2026: a start that took 22 s was abandoned by the spawner, a retry started
+# a second recorder, and the loser's error path wiped the first one's rec.json; it then recorded for 5 days) ---
+
+def test_the_recorder_lock_is_exclusive_and_names_its_holder(monkeypatch, tmp_path):
+    import os
+
+    from demovid.rec import state
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert state.lock_holder() is None
+    fd = state.try_lock()
+    assert fd is not None
+    assert state.lock_holder() == -1            # held, pid not written yet
+    state.set_lock_pid(fd, 4242)
+    assert state.lock_holder() == 4242
+    assert state.try_lock(attempts=1) is None   # a second recorder cannot start
+    os.close(fd)                                # what the kernel does when the recorder dies
+    assert state.lock_holder() is None
+    fd2 = state.try_lock()
+    assert fd2 is not None
+    os.close(fd2)
+
+
+def test_a_dying_recorder_never_clears_another_ones_state(monkeypatch, tmp_path):
+    from demovid.rec import state
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.write_state({"pid": 111, "dir": "/x"})
+    state.clear_state(owner=222)
+    assert state.read_state() == {"pid": 111, "dir": "/x"}
+    state.clear_state(owner=111)
+    assert state.read_state() is None
+    assert not list(tmp_path.glob("demovid/*.tmp"))
+
+
+def test_a_starting_recorder_shows_as_recording_and_a_toggle_stops_it(monkeypatch, tmp_path):
+    import argparse
+    import subprocess
+    import sys
+
+    from demovid import rec
+    from demovid.rec import state
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    # a recorder still importing: holds the lock, has written no rec.json yet
+    holder = subprocess.Popen([sys.executable, "-c",
+                               "import os, time\n"
+                               "from demovid.rec import state\n"
+                               "fd = state.try_lock(); state.set_lock_pid(fd, os.getpid()); print('up', flush=True)\n"
+                               "time.sleep(30)"], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "up"
+        st = rec.status()
+        assert st["recording"] and st["starting"] and st["pid"] == holder.pid
+        p = argparse.ArgumentParser()
+        rec.add_args(p)
+        monkeypatch.setattr(sys, "argv", ["demovid", "rec"])
+        assert rec.main(p.parse_args([])) == 0      # the toggle stops it rather than starting a second one
+        assert holder.wait(5) != 0
+        assert rec.status()["recording"] is False
+        assert state.lock_holder() is None
+    finally:
+        holder.kill()
+
+
+def test_a_recording_stops_itself_at_the_time_limit_or_a_nearly_full_disk():
+    from demovid.rec.session import MIN_FREE_BYTES, RecOptions, Session
+
+    s = Session(RecOptions(max_s=6 * 3600))
+    assert s.guard_reason(3600, 100 * 2**30) is None
+    assert "6 h limit" in s.guard_reason(6 * 3600, 100 * 2**30)
+    assert "GiB left" in s.guard_reason(60, MIN_FREE_BYTES - 1)
+    assert Session(RecOptions(max_s=0)).guard_reason(10 * 24 * 3600, None) is None

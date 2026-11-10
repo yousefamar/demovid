@@ -19,6 +19,8 @@ from .streams import (Preview, Stream, cam_stream, mic_stream, screen_stream, sy
 
 FIRST_FRAME_TIMEOUT_S = 8.0
 MIC_WAKE_TIMEOUT_S = 3.0
+GUARD_EVERY_S = 30.0
+MIN_FREE_BYTES = 2 * 2**30   # stop while there is still room to finalise the files
 
 
 @dataclass
@@ -38,6 +40,7 @@ class RecOptions:
     log_keys: bool = True
     notify: bool = True
     audio_only: bool = False    # a meeting: mic + PC audio, no screen/cam/cursor/input capture
+    max_s: float = 0.0          # stop on its own after this long (wall clock, pauses included); 0 = never
 
 
 @dataclass
@@ -213,12 +216,33 @@ class Session:
         self.notify("● REC", warn or f"{what} → {self.dir.name}")
         poke_waybar()
 
+        next_guard = 0.0
         while not self.stop_event.wait(0.25):
             if not primary.alive():
                 self.error = f"{primary.name} capture died mid-recording"
                 self.log(self.error)
                 break
+            if self.clock.now() >= next_guard:
+                next_guard = self.clock.now() + GUARD_EVERY_S
+                self.error = self.guard_reason(self.clock.now(), self._free_bytes())
+                if self.error:
+                    self.log(self.error)
+                    break
         return self._finish(aborted=False)
+
+    def _free_bytes(self) -> int | None:
+        try:
+            return shutil.disk_usage(self.dir).free
+        except OSError:
+            return None
+
+    def guard_reason(self, elapsed_s: float, free_bytes: int | None) -> str | None:
+        """Why a recording must stop on its own, if it must: a forgotten one ran 5 days into a full disk."""
+        if self.opts.max_s and elapsed_s >= self.opts.max_s:
+            return f"stopped at the {self.opts.max_s / 3600:g} h limit (--max-hours)"
+        if free_bytes is not None and free_bytes < MIN_FREE_BYTES:
+            return f"stopped: only {free_bytes / 2**30:.1f} GiB left on disk"
+        return None
 
     def _cursor_pos(self) -> tuple[int, int] | None:
         return self.cursor_session.position if self.cursor_session else None
@@ -396,12 +420,12 @@ class Session:
         self.events.close()
         if not aborted:
             self.write_manifest(stopped_at=t_stop)
-        clear_state()
+        clear_state(owner=os.getpid())
         poke_waybar()
         try:
             shutil.copy(log_path(), self.dir / "rec.log")
         except OSError:
             pass
         if not aborted:
-            self.notify("■ Saved" if not self.error else "■ Stopped (error)", str(self.dir), ms=6000)
+            self.notify("■ Saved" if not self.error else f"■ {self.error}", str(self.dir), ms=6000)
         return self.dir

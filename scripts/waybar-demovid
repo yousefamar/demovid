@@ -13,8 +13,10 @@ ICON_IDLE=$(printf '\357\200\275')    # U+F03D nf-fa-video_camera
 ICON_REC=$(printf '\342\227\217')     # U+25CF black circle
 ICON_PAUSE=$(printf '\342\217\270')   # U+23F8 double vertical bar
 ICON_MIC=$(printf '\357\204\260')     # U+F130 nf-fa-microphone (audio-only recording)
+ICON_START=$(printf '\342\227\213')   # U+25CB white circle (recorder starting, streams not up yet)
 
 state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/demovid/rec.json"
+lock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/demovid/rec.lock"
 prefs="${XDG_CONFIG_HOME:-$HOME/.config}/demovid/prefs.json"
 
 # idle: a dim camera glyph, so there is always a button to click
@@ -31,9 +33,18 @@ idle() {
   exit 0
 }
 
-[ -r "$state" ] || idle
+# no live state but the recorder lock is held: a recorder is starting (rec.json comes once its streams are up).
+# Showing it is what stops a second click from starting a second recorder (demovid CLAUDE.md, 5 Nov 2026).
+starting() {
+  if [ -e "$lock" ] && ! flock -n -s "$lock" true 2>/dev/null; then
+    printf '{"text":"%s","class":"recording","tooltip":"demovid: starting\\nclick for menu"}\n' "$ICON_START"
+    exit 0
+  fi
+}
+
+[ -r "$state" ] || { starting; idle; }
 pid=$(jq -r '.pid // empty' "$state" 2>/dev/null)
-[ -n "$pid" ] && [ -d "/proc/$pid" ] || idle
+[ -n "$pid" ] && [ -d "/proc/$pid" ] || { starting; idle; }
 
 started=$(jq -r '.started_at // empty' "$state")
 dir=$(jq -r '.dir // ""' "$state")

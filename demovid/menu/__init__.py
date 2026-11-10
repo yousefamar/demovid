@@ -39,7 +39,9 @@ def entries() -> list[tuple[str, str]]:
 
     st = status()
     out: list[tuple[str, str]] = []
-    if st["recording"]:
+    if st.get("starting"):
+        out.append((f"{ICONS['stop']}  Stop recording (starting)", "toggle-rec"))
+    elif st["recording"]:
         m, s = divmod(int(st["elapsed_s"]), 60)
         if st.get("paused"):
             out.append((f"{ICONS['resume']}  Resume recording  {m}:{s:02d}", "toggle-pause"))
@@ -110,10 +112,15 @@ def run(action: str) -> int:
     from demovid import prefs
     from demovid.rec.state import poke_waybar
 
-    if action == "toggle-rec":
-        return subprocess.run([sys.executable, "-m", "demovid.cli", "rec"]).returncode
-    if action == "start-audio":
-        return subprocess.run([sys.executable, "-m", "demovid.cli", "rec", "--audio-only"]).returncode
+    if action in ("toggle-rec", "start-audio"):
+        # a failed start used to say nothing, so the next pick started a second recorder
+        r = subprocess.run([sys.executable, "-m", "demovid.cli", "rec", *(["--audio-only"] if action == "start-audio" else [])],
+                           stderr=subprocess.PIPE, text=True)
+        sys.stderr.write(r.stderr)
+        if r.returncode:
+            lines = [ln for ln in r.stderr.splitlines() if ln.strip()]
+            notify(next((ln for ln in lines if "recorder" in ln), lines[-1] if lines else "recording failed"))
+        return r.returncode
     if action == "toggle-pause":
         return subprocess.run([sys.executable, "-m", "demovid.cli", "rec", "--pause"]).returncode
     if action.startswith("toggle:"):
@@ -173,7 +180,7 @@ def main(ns: argparse.Namespace) -> int:
         from demovid.rec import status
 
         st = status()
-        if st["recording"] and not st.get("paused"):
+        if st["recording"] and not st.get("paused") and not st.get("starting"):
             return run("toggle-pause")   # one click while live = pause, no UI in the way
     items = entries()
     if ns.print:

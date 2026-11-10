@@ -7,10 +7,12 @@ import sys
 import time
 from pathlib import Path
 
-from .state import clear_state, log_path, pid_alive, read_state, state_path
+from .state import (LOCK_ENV, clear_state, lock_holder, log_path, pid_alive, read_state, set_lock_pid,
+                    try_lock)
 
 STOP_TIMEOUT_S = 25.0
-START_TIMEOUT_S = 15.0
+START_TIMEOUT_S = 60.0    # a cold-cache start has taken 22 s; past this the child is stopped, never abandoned
+MAX_HOURS = 6.0
 
 
 def _size(text: str) -> tuple[int, int]:
@@ -58,6 +60,9 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-keys", dest="keys", action="store_false",
                    help="don't log keystrokes (passwords!) to events.jsonl")
     p.add_argument("--no-notify", action="store_true")
+    p.add_argument("--max-hours", type=float, default=MAX_HOURS,
+                   help=f"stop on its own after this long (default {MAX_HOURS:g}; 0 = never). It also stops "
+                        "when the disk is nearly full")
 
 
 def _options(ns: argparse.Namespace):
@@ -82,7 +87,7 @@ def _options(ns: argparse.Namespace):
         system_source=ns.system_source if system_audio else None,
         preview=preview and cam and not ns.audio_only, preview_size=ns.preview_size,
         hide_cursor=hide_cursor and not ns.audio_only, log_keys=keys and not ns.audio_only,
-        notify=not ns.no_notify, audio_only=ns.audio_only,
+        notify=not ns.no_notify, audio_only=ns.audio_only, max_s=max(0.0, ns.max_hours) * 3600,
     )
 
 
@@ -95,6 +100,10 @@ def status() -> dict:
         return {"recording": True, "dir": st["dir"], "pid": st["pid"],
                 "paused": paused_since is not None, "audio_only": bool(st.get("audio_only")),
                 "elapsed_s": round(now - st["started_at"] - paused, 1)}
+    holder = lock_holder()
+    if holder:   # started, streams not up yet: report it, so a second click stops it instead of starting another
+        return {"recording": True, "starting": True, "pid": holder, "dir": None, "paused": False,
+                "audio_only": False, "elapsed_s": 0.0}
     return {"recording": False, "paused": False, "stale": bool(st)}
 
 
@@ -108,8 +117,9 @@ def stop_recording(st: dict) -> int:
     os.kill(pid, signal.SIGINT)
     deadline = time.monotonic() + STOP_TIMEOUT_S
     while time.monotonic() < deadline:
-        if not pid_alive(pid) or not state_path().exists():
-            print(st["dir"])
+        cur = read_state()
+        if not pid_alive(pid) or (st.get("dir") and not (cur and cur.get("pid") == pid)):
+            print(st.get("dir") or f"stopped recorder pid {pid} (it was still starting)")
             return 0
         time.sleep(0.1)
     print(f"recorder pid {pid} did not exit in {STOP_TIMEOUT_S}s; run: demovid doctor --restore", file=sys.stderr)
@@ -117,17 +127,35 @@ def stop_recording(st: dict) -> int:
 
 
 def run_foreground(ns: argparse.Namespace) -> int:
+    # Catch stop signals before the slow imports (seconds on a cold cache): a stop sent while starting must
+    # not be lost, and a child started from a shell's `&` inherits SIGINT as ignored.
+    import threading
+
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    inherited = os.environ.pop(LOCK_ENV, None)   # the spawner took the lock and handed us its fd
+    if inherited is None:
+        lock_fd = try_lock()
+        if lock_fd is None:
+            print(f"another recorder is running (pid {lock_holder()})", file=sys.stderr)
+            return 1
+        set_lock_pid(lock_fd, os.getpid())
+    # the fd stays open (unreferenced) until this process exits; the kernel releases the lock then
+
     from .session import Session
 
-    session = Session(_options(ns))
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: session.stop_event.set())
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if stop.is_set():
+        print("stopped before recording started", file=sys.stderr)
+        return 0
+    session = Session(_options(ns), stop_event=stop)
     signal.signal(signal.SIGUSR1, lambda *_: session.toggle_pause())
     try:
         out = session.run()
     except Exception as e:
-        clear_state()
+        clear_state(owner=os.getpid())
         print(f"demovid rec: {e}", file=sys.stderr)
         return 1
     print(out)
@@ -135,11 +163,18 @@ def run_foreground(ns: argparse.Namespace) -> int:
 
 
 def spawn_daemon(argv: list[str]) -> int:
-    log = open(log_path(), "w")
+    lock_fd = try_lock()
+    if lock_fd is None:
+        print("another recorder is starting", file=sys.stderr)
+        return 1
+    log = open(log_path(), "w")   # only under the lock: truncating it under a live recorder lost its log
     child = subprocess.Popen(
         [sys.executable, "-m", "demovid.cli", "rec", "--daemon", *argv],
         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+        pass_fds=(lock_fd,), env={**os.environ, LOCK_ENV: str(lock_fd)},
     )
+    set_lock_pid(lock_fd, child.pid)
+    os.close(lock_fd)   # the child's copy keeps the lock
     deadline = time.monotonic() + START_TIMEOUT_S
     while time.monotonic() < deadline:
         st = read_state()
@@ -150,6 +185,19 @@ def spawn_daemon(argv: list[str]) -> int:
             break
         time.sleep(0.1)
     log.close()
+    if child.poll() is None:
+        # never leave a half-started recorder behind: one did, and recorded unseen for 5 days
+        child.send_signal(signal.SIGINT)
+        try:
+            child.wait(STOP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass
+        print(f"recorder did not start in {START_TIMEOUT_S:.0f}s; stopped it (exit {child.poll()}); "
+              f"log: {log_path()}", file=sys.stderr)
+        return 1
+    if child.returncode == 0:   # a toggle stopped it before the streams came up
+        print("recorder stopped before recording started")
+        return 0
     print(f"recorder failed to start (exit {child.poll()}); log: {log_path()}", file=sys.stderr)
     try:
         print(log_path().read_text()[-3000:], file=sys.stderr)
@@ -164,7 +212,9 @@ def main(ns: argparse.Namespace) -> int:
         return 0
     if ns.waybar:
         s = status()
-        if s["recording"]:
+        if s.get("starting"):
+            out = {"text": "\u25cb", "class": "starting", "tooltip": "demovid: starting"}
+        elif s["recording"]:
             m, sec = divmod(int(s["elapsed_s"]), 60)
             icon, cls = ("\u23f8", "paused") if s["paused"] else ("\uf130" if s["audio_only"] else "\u25cf", "recording")
             out = {"text": f"{icon} {m}:{sec:02d}", "class": cls, "tooltip": s["dir"]}
@@ -173,14 +223,22 @@ def main(ns: argparse.Namespace) -> int:
         print(json.dumps(out))
         return 0
 
+    if ns.daemon:   # the spawner already decided to start, and holds the lock for us
+        return run_foreground(ns)
     st = read_state()
     if ns.pause:
         if st and pid_alive(st["pid"]):
             return toggle_pause(st)
-        print("not recording", file=sys.stderr)
+        print("not recording" if not lock_holder() else "still starting", file=sys.stderr)
         return 1
     if st and pid_alive(st["pid"]):
         return stop_recording(st)
+    holder = lock_holder()
+    if holder and holder > 0 and pid_alive(holder):
+        return stop_recording({"pid": holder, "dir": None})   # a toggle while it starts stops it
+    if holder:
+        print("a recorder is starting; try again in a moment", file=sys.stderr)
+        return 1
     if st:
         from ..doctor import restore
 
@@ -189,7 +247,7 @@ def main(ns: argparse.Namespace) -> int:
     if ns.stop:
         print("not recording", file=sys.stderr)
         return 1
-    if ns.fg or ns.daemon:
+    if ns.fg:
         return run_foreground(ns)
     passthrough = [a for a in sys.argv[2:] if a not in ("--fg", "--daemon")]
     return spawn_daemon(passthrough)

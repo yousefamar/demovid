@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from ..rec import audio
-from ..rec.state import clear_state, pid_alive, read_state
+from ..rec.state import clear_state, lock_holder, pid_alive, read_state
 
 OK, WARN, FAIL = "ok", "WARN", "FAIL"
 
@@ -292,7 +292,19 @@ def checks(out_root: Path) -> list[tuple[str, str, str]]:
         res.append((WARN, "state", "stale recorder state: run `demovid doctor --restore`"))
     else:
         res.append((OK, "state", "idle"))
+    known = {state["pid"]} if state else set()
+    known.add(lock_holder())
+    strays = [pid for pid in stray_recorders() if pid not in known]
+    if strays:
+        res.append((WARN, "recorders", f"{len(strays)} recorder(s) running unseen by the bar (pid "
+                    f"{', '.join(map(str, strays))}); `kill -INT <pid>` stops one and saves its recording"))
     return res
+
+
+def stray_recorders() -> list[int]:
+    """Every live `demovid rec` recorder process (daemon or --fg); the bar knows at most one of them."""
+    out = subprocess.run(["pgrep", "-f", r"demovid\.cli rec .*--(daemon|fg)"], capture_output=True, text=True).stdout
+    return [int(p) for p in out.split() if int(p) != os.getpid()]
 
 
 def main(ns: argparse.Namespace) -> int:
